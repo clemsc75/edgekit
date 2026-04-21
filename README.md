@@ -159,7 +159,7 @@ edgekit/
 │   └── stop-local.sh        # Stop local stack
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml           # CI: lint + build on PR
+│       ├── ci.yml           # CI: lint + build on PR/push to develop|main
 │       └── release.yml      # Release: push images + Helm chart on tag
 ├── docs/
 │   ├── architecture.md
@@ -171,10 +171,10 @@ edgekit/
 
 ## CI / CD
 
-| Workflow      | Trigger              | What it does                                                                      |
-| ------------- | -------------------- | --------------------------------------------------------------------------------- |
-| `ci.yml`      | push / PR to `main`  | Lints Helm chart, builds both Docker images                                       |
-| `release.yml` | push of `v*.*.*` tag | Builds & pushes images to GHCR, packages & pushes Helm chart to GHCR OCI registry |
+| Workflow      | Trigger                          | What it does                                                                      |
+| ------------- | -------------------------------- | --------------------------------------------------------------------------------- |
+| `ci.yml`      | push / PR to `develop` or `main` | Lints Helm chart, builds both Docker images                                       |
+| `release.yml` | push of `v*.*.*` tag             | Builds & pushes images to GHCR, packages & pushes Helm chart to GHCR OCI registry |
 
 To release a new version:
 
@@ -182,6 +182,16 @@ To release a new version:
 git tag v1.0.0
 git push origin v1.0.0
 ```
+
+---
+
+## Branching strategy
+
+| Branch      | Purpose                                              |
+| ----------- | ---------------------------------------------------- |
+| `main`      | Production-ready releases only                       |
+| `develop`   | Integration branch – all feature branches merge here |
+| `feature/*` | Individual features or fixes                         |
 
 ---
 
