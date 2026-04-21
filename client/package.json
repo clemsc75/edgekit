@@ -1,0 +1,14 @@
+{
+  "name": "edgekit-client",
+  "version": "1.0.0",
+  "description": "Edge agent – collects system metrics and streams to central MQTT broker",
+  "main": "src/index.js",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.1",
+    "systeminformation": "^5.31.5"
+  }
+}

@@ -1,0 +1,79 @@
+# =============================================================================
+# EdgeKit Helm Chart – default values
+# =============================================================================
+
+# -- Global image registry prefix (optional)
+global:
+  imageRegistry: ""
+
+# =============================================================================
+# Server – Eclipse Mosquitto MQTT broker
+# =============================================================================
+server:
+  enabled: true
+
+  image:
+    repository: ghcr.io/perspikapps/edgekit-server
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  replicaCount: 1
+
+  service:
+    type: ClusterIP
+    mqttPort: 1883
+    wsPort: 9001
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 1Gi
+
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# =============================================================================
+# Client – Edge agent
+# =============================================================================
+client:
+  enabled: true
+
+  image:
+    repository: ghcr.io/perspikapps/edgekit-client
+    tag: "latest"
+    pullPolicy: IfNotPresent
+
+  # Number of edge agent replicas (one per logical edge site)
+  replicaCount: 1
+
+  # MQTT broker URL – defaults to the in-cluster server service
+  mqttBrokerUrl: "ws://edgekit-server:9001"
+
+  topicPrefix: "edgekit"
+
+  # Publish interval in milliseconds
+  publishIntervalMs: 5000
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

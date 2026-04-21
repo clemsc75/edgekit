@@ -1,0 +1,25 @@
+{{- if .Values.server.enabled }}
+NOTES:
+EdgeKit has been deployed!
+
+Server (MQTT Broker):
+  Service: {{ include "edgekit.server.fullname" . }}
+  MQTT (plain):  {{ .Values.server.service.mqttPort }}
+  MQTT (WS):     {{ .Values.server.service.wsPort }}
+
+  To access the broker from within the cluster:
+    mqtt://{{ include "edgekit.server.fullname" . }}:{{ .Values.server.service.mqttPort }}
+    ws://{{ include "edgekit.server.fullname" . }}:{{ .Values.server.service.wsPort }}
+
+{{- if .Values.client.enabled }}
+Client (Edge Agent):
+  Replicas: {{ .Values.client.replicaCount }}
+  Publishing to: {{ .Values.client.mqttBrokerUrl }}
+  Topic prefix: {{ .Values.client.topicPrefix }}/<pod-name>/metrics
+  Interval: {{ .Values.client.publishIntervalMs }}ms
+{{- end }}
+
+To watch logs:
+  kubectl logs -f -l app.kubernetes.io/component=server
+  kubectl logs -f -l app.kubernetes.io/component=client
+{{- end }}

@@ -1,0 +1,43 @@
+version: "3.9"
+
+# EdgeKit – local development stack
+# Runs 1 server (MQTT broker) + 1 client (edge agent)
+# Usage: docker compose up --build
+
+services:
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    image: edgekit-server:local
+    container_name: edgekit-server
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # MQTT
+      - "9001:9001"   # MQTT over WebSocket
+    volumes:
+      - mosquitto-data:/mosquitto/data
+    healthcheck:
+      test: ["CMD", "mosquitto_pub", "-h", "localhost", "-t", "healthcheck", "-m", "ping", "-q", "0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    image: edgekit-client:local
+    container_name: edgekit-client
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      MQTT_BROKER_URL: ws://server:9001
+      MQTT_TOPIC_PREFIX: edgekit
+      CLIENT_ID: edge-local-1
+      PUBLISH_INTERVAL_MS: "5000"
+
+volumes:
+  mosquitto-data:

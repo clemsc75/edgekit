@@ -1,0 +1,19 @@
+apiVersion: v2
+name: edgekit
+description: >
+  EdgeKit – a client/server IoT edge platform running on k3s.
+  Deploys a central MQTT broker (server) and one or more edge agents (clients).
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+keywords:
+  - iot
+  - mqtt
+  - edge
+  - k3s
+home: https://github.com/perspikapps/edgekit
+sources:
+  - https://github.com/perspikapps/edgekit
+maintainers:
+  - name: edgekit maintainers
+    url: https://github.com/perspikapps/edgekit

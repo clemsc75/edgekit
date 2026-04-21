@@ -1,0 +1,23 @@
+{{- if .Values.server.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "edgekit.server.fullname" . }}
+  labels:
+    {{- include "edgekit.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  type: {{ .Values.server.service.type }}
+  selector:
+    {{- include "edgekit.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+  ports:
+    - name: mqtt
+      port: {{ .Values.server.service.mqttPort }}
+      targetPort: mqtt
+      protocol: TCP
+    - name: websockets
+      port: {{ .Values.server.service.wsPort }}
+      targetPort: websockets
+      protocol: TCP
+{{- end }}
