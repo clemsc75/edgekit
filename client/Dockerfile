@@ -1,4 +1,8 @@
-FROM node:20-alpine
+FROM opensuse/leap-micro:6.2
+
+RUN zypper --non-interactive install --no-recommends nodejs20 npm20 && \
+    zypper clean --all && \
+    useradd --create-home --shell /bin/sh node
 
 LABEL org.opencontainers.image.title="edgekit-client"
 LABEL org.opencontainers.image.description="Edge agent for edgekit – collects metrics and streams to central MQTT broker"
