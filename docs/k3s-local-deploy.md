@@ -97,7 +97,7 @@ Why:
 
 If the system uses `apt`, the script installs what is missing to run the test:
 
-```bash
+```text
 curl
 ca-certificates
 docker.io
@@ -299,6 +299,71 @@ The client must connect to:
 
 ```text
 ws://edgekit-server:9001
+```
+
+### Optional: inspect published JSON payloads
+
+This check lets you read the JSON payloads published by `edgekit-client` on MQTT topics.
+
+The `edgekit-server` `Service` is a `ClusterIP`, so it is not directly exposed on the host. Use `kubectl port-forward` to access it locally.
+
+Important:
+
+- port `1883` is plain MQTT over TCP;
+- port `9001` is MQTT over WebSocket;
+- `mosquitto_sub` uses plain MQTT here, so forward port `1883`.
+
+Terminal 1, keep this command running:
+
+```bash
+kubectl -n edgekit port-forward svc/edgekit-server 1883:1883
+```
+
+Expected output:
+
+```text
+Forwarding from 127.0.0.1:1883 -> 1883
+Forwarding from [::1]:1883 -> 1883
+```
+
+Terminal 2, install `jq` to format JSON:
+
+```bash
+sudo apt-get install -y jq
+```
+
+Then subscribe to MQTT topics:
+
+```bash
+sudo docker run --rm --network host eclipse-mosquitto:2.0 \
+  mosquitto_sub -h 127.0.0.1 -p 1883 -t "edgekit/#" -v \
+| while read -r topic payload; do
+    echo "TOPIC: $topic"
+    echo "$payload" | jq .
+  done
+```
+
+Why:
+
+- `kubectl port-forward` makes the internal `Service` reachable from `127.0.0.1`;
+- `mosquitto_sub` listens to all topics under `edgekit/#`;
+- `jq` prints the JSON payload in a readable format.
+
+Example output:
+
+```text
+TOPIC: edgekit/edgekit-client-7b68478f8-snhpl/metrics
+{
+  "clientId": "edgekit-client-7b68478f8-snhpl",
+  "timestamp": "2026-06-05T17:27:55.306Z",
+  "cpu": {
+    "loadPercent": 5.71,
+    "cores": 2
+  },
+  "memory": {
+    "usedPercent": 93.67
+  }
+}
 ```
 
 ---
