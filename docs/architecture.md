@@ -78,6 +78,10 @@ The client is a Node.js application that:
 
 The MQTT client uses exponential-back-off reconnection (built into the `mqtt` npm package) with a 5-second base period. The container exits cleanly on SIGTERM/SIGINT, draining in-flight publishes first.
 
+### Base image
+
+The `edgekit-client` Docker image uses the official `node:20-alpine` base image. This was chosen to provide a compact, officially maintained Node.js runtime while keeping the container small and secure. See [ISSUE_03](../issue/ISSUE_03_migrate-to-alpine-base-image.md) for migration details and validation results.
+
 ---
 
 ## Topic structure
@@ -118,5 +122,17 @@ The architecture is intentionally minimal. Common extensions:
 
 - **Add authentication**: Configure Mosquitto password files or TLS certificates via a Kubernetes Secret mounted into the server container.
 - **Add a dashboard**: Deploy [MQTT Explorer](https://mqtt-explorer.com/) or [Grafana + EMQX](https://docs.emqx.com/en/emqx/latest/dashboard/introduction.html) as additional pods.
-- **Custom metrics**: Extend `client/src/index.js` to publish additional data (GPIO readings, custom sensors, application logs, etc.).
+- **Custom metrics**: Extend `client/src/index.js` to publish additional data (GPIO readings, custom sensors, application logs, etc.). For example, inside `collectMetrics()`:
+  ```javascript
+  // 1. Fetch your custom data
+  const temperature = await getSensorData(); 
+  
+  return {
+    // ... existing properties
+    custom: {
+      temperature: temperature,
+      status: "ok"
+    }
+  };
+  ```
 - **Multiple namespaces**: Deploy the chart multiple times with different `MQTT_TOPIC_PREFIX` values.

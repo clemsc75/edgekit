@@ -5,6 +5,7 @@ npm-debug.log*
 # Build outputs
 dist/
 build/
+logs/
 
 # Docker
 .docker/

@@ -19,10 +19,10 @@ It provides a central MQTT broker (server) and lightweight edge agents (clients)
 │  └───────────────────────────────────┘  │
 │            ▲              ▲             │
 │            │  WebSocket   │             │
-│  ┌─────────┴──┐    ┌──────┴─────────┐  │
-│  │   client 1 │    │   client N     │  │
-│  │ edge agent │    │  edge agent    │  │
-│  └────────────┘    └────────────────┘  │
+│  ┌─────────┴──┐    ┌──────┴─────────┐   │
+│  │   client 1 │    │   client N     │   │
+│  │ edge agent │    │  edge agent    │   │
+│  └────────────┘    └────────────────┘   │
 └─────────────────────────────────────────┘
 ```
 
@@ -111,6 +111,29 @@ helm install edgekit ./helm/edgekit \
   --create-namespace
 ```
 
+### Local k3s test deploy
+
+Run the local k3s test with one script. It installs missing prerequisites
+automatically on apt-based Linux systems, then builds the local Docker images,
+imports them into k3s containerd, deploys the local Helm chart, and writes a
+deployment log.
+
+```bash
+chmod +x ./scripts/k3s-local.sh
+./scripts/k3s-local.sh
+```
+
+Optional variables:
+
+```bash
+IMAGE_TAG=test-1 CLIENT_REPLICAS=3 ./scripts/k3s-local.sh
+```
+
+Logs are written under `logs/`.
+
+For the complete walkthrough and OS compatibility notes, see
+[docs/k3s-local-deploy.md](docs/k3s-local-deploy.md).
+
 ### Verify
 
 ```bash
@@ -132,6 +155,10 @@ All configuration is via environment variables (client) and `values.yaml` (Helm)
 | `PUBLISH_INTERVAL_MS` | `5000`                     | Metrics publish interval in milliseconds |
 
 See [helm/edgekit/values.yaml](helm/edgekit/values.yaml) for the full Helm configuration reference.
+
+## Image base
+
+The client image now uses the official `node:20-alpine` base image. This change was made to simplify the build and reduce image size. For background, tests and validation details see [ISSUE_03](issue/ISSUE_03_migrate-to-alpine-base-image.md).
 
 ---
 
@@ -155,6 +182,7 @@ edgekit/
 │       └── templates/
 ├── scripts/
 │   ├── build.sh             # Build Docker images
+│   ├── k3s-local.sh         # Prepare and run local k3s test deployment
 │   ├── start-local.sh       # Start via docker compose
 │   └── stop-local.sh        # Stop local stack
 ├── .github/
