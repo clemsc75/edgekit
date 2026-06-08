@@ -166,6 +166,27 @@ verify_architecture() {
   esac
 }
 
+ensure_pi_cgroups() {
+  # --- AUTOMATION: FIX CGROUPS FOR RASPBERRY PI ---
+  # 1. Detect the correct path for cmdline.txt
+  local cmdline_file="/boot/firmware/cmdline.txt"
+  [ ! -f "${cmdline_file}" ] && cmdline_file="/boot/cmdline.txt"
+
+  # 2. Check if cgroups are already configured
+  if [ -f "${cmdline_file}" ] && ! grep -q "cgroup_enable=memory" "${cmdline_file}"; then
+      echo "==> [Configuration] Automatically enabling cgroups for k3s..."
+      
+      # Append options to the end of the single line without adding a newline
+      as_root sed -i 's/$/ cgroup_enable=cpuset cgroup_enable=memory cgroup_memory=1/' "${cmdline_file}"
+      
+      echo "==> [Configuration] Configuration successful. Automatic reboot required..."
+      echo "==> Simply rerun this script after the reboot."
+      sleep 3
+      as_root reboot
+      exit 0
+  fi
+}
+
 verify_cluster() {
   echo "==> Verifying k3s access"
 
@@ -240,6 +261,7 @@ DOCKER_CMD=("${DOCKER_BIN}")
 
 echo "==> EdgeKit k3s-local test"
 verify_architecture
+ensure_pi_cgroups
 ensure_base_packages
 ensure_docker
 ensure_k3s
