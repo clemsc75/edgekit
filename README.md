@@ -119,6 +119,9 @@ Run the local K3s test using two separate scripts to simulate a Master (Server) 
 ```bash
 chmod +x ./scripts/k3s-master.sh
 ./scripts/k3s-master.sh
+
+# Debug mode (full output, no spinner):
+./scripts/k3s-master.sh --verbose
 ```
 This script will print out the IP and Token parameters to run on the Worker node:
 
@@ -126,11 +129,24 @@ This script will print out the IP and Token parameters to run on the Worker node
 ```bash
 chmod +x ./scripts/k3s-worker.sh
 ./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>"
+
+# Debug mode (full output, no spinner):
+./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>" --verbose
 ```
 
 Optional variables on Master:
 ```bash
 IMAGE_TAG=test-1 CLIENT_REPLICAS=3 ./scripts/k3s-master.sh
+```
+
+**3. Cleanup / Uninstall (on either node):**
+```bash
+# Auto-detect role and clean up
+bash scripts/uninstall-edgekit.sh
+
+# Or specify the role explicitly
+bash scripts/uninstall-edgekit.sh --role master
+bash scripts/uninstall-edgekit.sh --role worker
 ```
 
 Logs are written under `logs/`.
@@ -185,9 +201,12 @@ edgekit/
 │       ├── values.yaml
 │       └── templates/
 ├── scripts/
+│   ├── lib/
+│   │   └── spinner.sh       # Shared spinner/progress-indicator utilities
 │   ├── build.sh             # Build Docker images
 │   ├── k3s-master.sh        # Configure K3s Master/Server node
 │   ├── k3s-worker.sh        # Configure K3s Worker/Agent node
+│   ├── uninstall-edgekit.sh # Full cleanup of a Master or Worker node
 │   ├── start-local.sh       # Start via docker compose
 │   └── stop-local.sh        # Stop local stack
 ├── .github/

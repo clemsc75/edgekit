@@ -9,6 +9,10 @@
 #   --master-ip <IP>     IP address of the K3s master node
 #   --token <TOKEN>      Node token from the master (k3s-master.sh output)
 #
+# Optional flags:
+#   --verbose, -v        Print all command output to the terminal (no spinner).
+#                        Useful for debugging if the spinner freezes.
+#
 # Optional environment variables:
 #   NAMESPACE            – Kubernetes namespace          (default: edgekit)
 #   RELEASE_NAME         – Helm release name             (default: edgekit)
@@ -17,40 +21,34 @@
 #   PUBLISH_INTERVAL_MS  – Client publish interval (ms)  (default: 5000)
 #   LOG_DIR              – Directory for log files        (default: <repo>/logs)
 #   DOCKER_BIN           – Docker binary override        (default: docker)
+#   VERBOSE              – Set to 1 to disable spinner    (same as --verbose)
 # =============================================================================
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-NAMESPACE="${NAMESPACE:-edgekit}"
-RELEASE_NAME="${RELEASE_NAME:-edgekit}"
-IMAGE_TAG="${IMAGE_TAG:-k3s-local}"
-CLIENT_REPLICAS="${CLIENT_REPLICAS:-1}"
-PUBLISH_INTERVAL_MS="${PUBLISH_INTERVAL_MS:-5000}"
-LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs}"
-DOCKER_BIN="${DOCKER_BIN:-docker}"
-
-CLIENT_IMAGE="edgekit-client:${IMAGE_TAG}"
-LOG_FILE="${LOG_DIR}/k3s-worker-$(date +%Y%m%d-%H%M%S).log"
-
 # =============================================================================
-# Parse CLI arguments
+# Flag & argument parsing  (must happen before the exec-level tee redirect)
 # =============================================================================
 
+VERBOSE="${VERBOSE:-0}"
 MASTER_IP=""
 K3S_TOKEN=""
 
 usage() {
   echo ""
-  echo "Usage: bash scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN>"
+  echo "Usage: bash scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN> [--verbose]"
   echo ""
   echo "Required arguments:"
   echo "  --master-ip <IP>     IP address of the K3s master node"
   echo "  --token <TOKEN>      Join token from the master (shown by k3s-master.sh)"
   echo ""
+  echo "Optional flags:"
+  echo "  --verbose, -v        Show full command output (debug mode, no spinner)"
+  echo ""
   echo "Optional environment variables:"
   echo "  NAMESPACE, RELEASE_NAME, IMAGE_TAG, CLIENT_REPLICAS,"
-  echo "  PUBLISH_INTERVAL_MS, LOG_DIR, DOCKER_BIN"
+  echo "  PUBLISH_INTERVAL_MS, LOG_DIR, DOCKER_BIN, VERBOSE"
   echo ""
   exit 1
 }
@@ -65,6 +63,10 @@ while [[ $# -gt 0 ]]; do
       K3S_TOKEN="$2"
       shift 2
       ;;
+    --verbose|-v)
+      VERBOSE=1
+      shift
+      ;;
     -h|--help)
       usage
       ;;
@@ -75,13 +77,39 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+export VERBOSE
+
 if [ -z "${MASTER_IP}" ] || [ -z "${K3S_TOKEN}" ]; then
   echo "ERROR: --master-ip and --token are both required." >&2
   usage
 fi
 
+# Prevent apt-get / dpkg from opening interactive prompts hidden by the spinner.
+export DEBIAN_FRONTEND=noninteractive
+
+NAMESPACE="${NAMESPACE:-edgekit}"
+RELEASE_NAME="${RELEASE_NAME:-edgekit}"
+IMAGE_TAG="${IMAGE_TAG:-k3s-local}"
+CLIENT_REPLICAS="${CLIENT_REPLICAS:-1}"
+PUBLISH_INTERVAL_MS="${PUBLISH_INTERVAL_MS:-5000}"
+LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs}"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+
+CLIENT_IMAGE="edgekit-client:${IMAGE_TAG}"
+LOG_FILE="${LOG_DIR}/k3s-worker-$(date +%Y%m%d-%H%M%S).log"
+
 mkdir -p "${LOG_DIR}"
+# All script-level echo / print_section output goes to terminal + log via tee.
+# run_with_spinner bypasses this by writing command output directly to LOG_FILE.
 exec > >(tee -a "${LOG_FILE}") 2>&1
+
+# =============================================================================
+# Load spinner library and register signal traps
+# =============================================================================
+
+# shellcheck source=scripts/lib/spinner.sh
+source "${REPO_ROOT}/scripts/lib/spinner.sh"
+spinner_register_traps
 
 # =============================================================================
 # Utility helpers
@@ -185,9 +213,14 @@ install_apt_packages() {
     exit 1
   fi
 
-  echo "==> Installing missing apt packages: ${packages[*]}"
-  as_root apt-get update -qq
-  as_root apt-get install -y "${packages[@]}"
+  echo "==> Installing: ${packages[*]}"
+  run_with_spinner "Updating apt package index" \
+    as_root apt-get update -qq
+  run_with_spinner "Installing: ${packages[*]}" \
+    as_root apt-get install -y -qq \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" \
+      "${packages[@]}"
 }
 
 ensure_download_tools() {
@@ -236,52 +269,25 @@ ensure_docker() {
 }
 
 ensure_k3s_agent() {
-  if command_exists k3s; then
-    echo "==> k3s is already installed"
-  else
-    ensure_download_tools
+  ensure_download_tools
 
-    echo "==> Installing k3s agent"
-    # Install k3s in agent mode only (no server components)
+  if command_exists k3s; then
+    echo "==> K3s is already installed – updating agent configuration with Master IP ${MASTER_IP}..."
+  else
+    echo "==> Installing K3s agent..."
+  fi
+
+  # The official K3s install script is idempotent:
+  # - First run  → installs the binary and creates the systemd service.
+  # - Subsequent runs → updates K3S_URL and K3S_TOKEN in the service and restarts the agent.
+  # This means relaunching the script with a new --master-ip automatically reconnects the worker.
+  _do_install_k3s_agent() {
     curl -sfL https://get.k3s.io | \
       K3S_URL="https://${MASTER_IP}:6443" \
       K3S_TOKEN="${K3S_TOKEN}" \
       sh -s - agent
-  fi
-
-  # If k3s was already installed but not configured as an agent, configure it now
-  if ! systemctl is-active --quiet k3s-agent 2>/dev/null; then
-    if command_exists systemctl; then
-      # Try to configure and start k3s agent service
-      echo "==> Configuring k3s agent service"
-      as_root bash -c "cat > /etc/systemd/system/k3s-agent.service <<EOF
-[Unit]
-Description=Lightweight Kubernetes (K3s) Agent
-Documentation=https://k3s.io
-After=network-online.target
-
-[Service]
-Type=notify
-Environment=\"K3S_URL=https://${MASTER_IP}:6443\"
-Environment=\"K3S_TOKEN=${K3S_TOKEN}\"
-ExecStart=/usr/local/bin/k3s agent
-KillMode=process
-Delegate=yes
-LimitNOFILE=1048576
-LimitNPROC=infinity
-LimitCORE=infinity
-TasksMax=infinity
-TimeoutStartSec=0
-Restart=always
-RestartSec=5s
-
-[Install]
-WantedBy=multi-user.target
-EOF"
-      as_root systemctl daemon-reload
-      as_root systemctl enable --now k3s-agent >/dev/null 2>&1 || true
-    fi
-  fi
+  }
+  run_with_spinner "Installing/updating K3s agent" _do_install_k3s_agent
 
   if command_exists systemctl && systemctl is-active --quiet k3s-agent 2>/dev/null; then
     echo "==> k3s agent service is active"
@@ -382,18 +388,21 @@ print_versions() {
 
 deploy_edgekit_client() {
   print_section "BUILDING & DEPLOYING EDGEKIT CLIENT IMAGE"
+  echo "  Log file: ${LOG_FILE}"
 
-  echo "==> Building EdgeKit client image: ${CLIENT_IMAGE}"
-  echo "==> Writing log to ${LOG_FILE}"
+  _do_docker_build_client() {
+    "${DOCKER_CMD[@]}" build \
+      --tag "${CLIENT_IMAGE}" \
+      --file "${REPO_ROOT}/client/Dockerfile" \
+      "${REPO_ROOT}/client"
+  }
 
-  "${DOCKER_CMD[@]}" build \
-    --tag "${CLIENT_IMAGE}" \
-    --file "${REPO_ROOT}/client/Dockerfile" \
-    "${REPO_ROOT}/client"
+  _do_import_client_image() {
+    "${DOCKER_CMD[@]}" save "${CLIENT_IMAGE}" | as_root k3s ctr images import -
+  }
 
-  echo ""
-  echo "==> Importing client image into k3s containerd"
-  "${DOCKER_CMD[@]}" save "${CLIENT_IMAGE}" | as_root k3s ctr images import -
+  run_with_spinner "Building Docker client image" _do_docker_build_client
+  run_with_spinner "Importing client image into containerd" _do_import_client_image
 
   echo ""
   echo "==> Client image imported successfully"
@@ -464,11 +473,14 @@ run_worker_tests() {
   fi
 
   # Test 4 – Docker image is in containerd
-  echo "[TEST 4/5] Client image is present in k3s containerd..."
-  if as_root k3s ctr images list 2>/dev/null | grep -q "edgekit-client"; then
-    echo "  PASS – Client image found in containerd store"
+  # NOTE: Kubernetes stores images in the "k8s.io" containerd namespace, NOT the default
+  # namespace. Without "-n k8s.io", k3s ctr images list returns an empty set even when the
+  # image is correctly imported, causing a false-positive FAIL.
+  echo "[TEST 4/5] Client image is present in k3s containerd (k8s.io namespace)..."
+  if as_root k3s ctr -n k8s.io images list 2>/dev/null | grep -q "edgekit-client"; then
+    echo "  PASS – Client image found in containerd store (k8s.io namespace)"
   else
-    echo "  FAIL – Client image NOT found in containerd store"
+    echo "  FAIL – Client image NOT found in containerd store (k8s.io namespace)"
     failed=$((failed + 1))
   fi
 
@@ -528,6 +540,11 @@ echo ""
 echo "============================================================"
 echo "  EdgeKit – K3s Worker Node Setup"
 echo "  Master  : ${MASTER_IP}"
+if [ "${VERBOSE}" = "1" ]; then
+echo "  Mode    : VERBOSE (full output)"
+else
+echo "  Mode    : Spinner (full log: ${LOG_FILE})"
+fi
 echo "============================================================"
 
 verify_architecture

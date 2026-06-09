@@ -34,6 +34,9 @@ On the Master machine (x86_64):
 ```bash
 chmod +x ./scripts/k3s-master.sh
 ./scripts/k3s-master.sh
+
+# Debug mode (full output, no spinner):
+./scripts/k3s-master.sh --verbose
 ```
 
 #### What the Master script does:
@@ -74,6 +77,9 @@ Run the worker script using the IP and Token provided by the Master node:
 ```bash
 chmod +x ./scripts/k3s-worker.sh
 ./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>"
+
+# Debug mode (full output, no spinner):
+./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>" --verbose
 ```
 
 #### What the Worker script does:
@@ -156,26 +162,62 @@ IMAGE_TAG=custom-v1 ./scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN>
 
 ---
 
+## Handling Reboots, Rerunning, and IP Changes
+
+Both `k3s-master.sh` and `k3s-worker.sh` are designed to be **idempotent**, meaning they can be run multiple times safely without breaking existing configurations.
+
+### What happens on system reboot?
+- **K3s services auto-start**: The K3s server on the Master (`k3s` systemd service) and the K3s agent on the Worker (`k3s-agent` systemd service) are automatically enabled to start on system boot. You do **not** need to rerun the scripts to start K3s after restarting the machines.
+- **Docker auto-starts**: The Docker daemon also starts automatically on boot.
+
+### Rerunning the scripts
+You can rerun the scripts at any time to:
+- Rebuild and re-import the local Docker images if you made code changes.
+- Re-run the automated validation tests.
+- Re-apply Helm deployments (on Master).
+
+### Handling Master IP Changes (e.g., DHCP changes after reboot)
+In a local environment without static/reserved IP addresses, the Master node's IP address might change after a reboot. The scripts make it easy to update the configuration:
+
+1. **The Join Token is Permanent**: The K3s cluster token generated on the Master node is stored persistently in `/var/lib/rancher/k3s/server/node-token` and does **not** change when the Master's IP changes or when the machine reboots. You can always reuse the same token.
+2. **Retrieve the New IP**: Rerun the Master script or check the machine's IP address:
+   ```bash
+   ./scripts/k3s-master.sh
+   ```
+   This will display the new connection block with the updated IP.
+3. **Update the Worker Node**: Run the worker script with the **new Master IP** and the **same token**:
+   ```bash
+   bash scripts/k3s-worker.sh --master-ip "<NEW_MASTER_IP>" --token "<SAME_TOKEN>"
+   ```
+   The worker script will automatically update the K3s agent service configuration (`K3S_URL`), restart the agent, and reconnect the Worker node to the Master.
+
+---
+
 ## Log Files
 
 Logs are written under the `logs/` directory in the repository root:
 - Master log: `logs/k3s-master-YYYYMMDD-HHMMSS.log`
 - Worker log: `logs/k3s-worker-YYYYMMDD-HHMMSS.log`
+- Uninstall log: `logs/uninstall-edgekit-YYYYMMDD-HHMMSS.log`
+
+> [!TIP]
+> If the spinner freezes or you need to debug a failed step, rerun any script with the `--verbose` flag to see the full raw output directly in the terminal.
 
 ---
 
 ## Uninstallation
 
-To cleanly stop the cluster and remove EdgeKit:
+Use the dedicated `uninstall-edgekit.sh` script to perform a **complete cleanup** of any node (removes K3s, Helm releases, CNI interfaces, and EdgeKit Docker images):
 
-1. **Uninstall Helm deployment** (on Master):
-   ```bash
-   helm uninstall edgekit --namespace edgekit
-   kubectl delete namespace edgekit
-   ```
+```bash
+# On the Master node
+bash scripts/uninstall-edgekit.sh --role master
 
-2. **Clean up Worker Node** (on Worker):
-   If you wish to stop the K3s agent service:
-   ```bash
-   sudo systemctl disable --now k3s-agent
-   ```
+# On the Worker node
+bash scripts/uninstall-edgekit.sh --role worker
+
+# Auto-detect role (checks which k3s uninstall script is present)
+bash scripts/uninstall-edgekit.sh
+```
+
+After cleanup, the machine will be in a clean state and you can safely rerun `k3s-master.sh` or `k3s-worker.sh`.

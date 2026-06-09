@@ -3,7 +3,11 @@
 # scripts/k3s-master.sh – Configure the K3s Server (Master) node for EdgeKit
 #
 # Architecture : x86/AMD64 only
-# Usage        : bash scripts/k3s-master.sh
+# Usage        : bash scripts/k3s-master.sh [--verbose]
+#
+# Flags:
+#   --verbose / -v       Print all command output to the terminal (no spinner).
+#                        Useful for debugging if the spinner freezes.
 #
 # Environment variables (all optional):
 #   NAMESPACE            – Kubernetes namespace          (default: edgekit)
@@ -13,10 +17,40 @@
 #   PUBLISH_INTERVAL_MS  – Client publish interval (ms)  (default: 5000)
 #   LOG_DIR              – Directory for log files        (default: <repo>/logs)
 #   DOCKER_BIN           – Docker binary override        (default: docker)
+#   VERBOSE              – Set to 1 to disable spinner    (same as --verbose)
 # =============================================================================
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# =============================================================================
+# Flag parsing  (must happen before the exec-level tee redirect below)
+# =============================================================================
+
+VERBOSE="${VERBOSE:-0}"
+
+_master_usage() {
+  echo ""
+  echo "Usage: bash scripts/k3s-master.sh [--verbose]"
+  echo ""
+  echo "  --verbose, -v   Show full command output in the terminal (debug mode)"
+  echo "  --help,    -h   Show this help message"
+  echo ""
+  exit 0
+}
+
+for _arg in "$@"; do
+  case "${_arg}" in
+    --verbose|-v) VERBOSE=1 ;;
+    --help|-h)    _master_usage ;;
+    *) echo "ERROR: Unknown argument: ${_arg}" >&2; _master_usage ;;
+  esac
+done
+export VERBOSE
+
+# Prevent apt-get / dpkg from opening interactive prompts (e.g. service restart
+# dialogs) that would be hidden behind the spinner and stall the script.
+export DEBIAN_FRONTEND=noninteractive
 
 NAMESPACE="${NAMESPACE:-edgekit}"
 RELEASE_NAME="${RELEASE_NAME:-edgekit}"
@@ -31,7 +65,17 @@ CLIENT_IMAGE="edgekit-client:${IMAGE_TAG}"
 LOG_FILE="${LOG_DIR}/k3s-master-$(date +%Y%m%d-%H%M%S).log"
 
 mkdir -p "${LOG_DIR}"
+# All script-level echo / print_section output goes to terminal + log via tee.
+# run_with_spinner bypasses this by writing command output directly to LOG_FILE.
 exec > >(tee -a "${LOG_FILE}") 2>&1
+
+# =============================================================================
+# Load spinner library and register signal traps
+# =============================================================================
+
+# shellcheck source=scripts/lib/spinner.sh
+source "${REPO_ROOT}/scripts/lib/spinner.sh"
+spinner_register_traps
 
 # =============================================================================
 # Utility helpers
@@ -99,9 +143,14 @@ install_apt_packages() {
     exit 1
   fi
 
-  echo "==> Installing missing apt packages: ${packages[*]}"
-  as_root apt-get update -qq
-  as_root apt-get install -y "${packages[@]}"
+  echo "==> Installing: ${packages[*]}"
+  run_with_spinner "Updating apt package index" \
+    as_root apt-get update -qq
+  run_with_spinner "Installing: ${packages[*]}" \
+    as_root apt-get install -y -qq \
+      -o Dpkg::Options::="--force-confdef" \
+      -o Dpkg::Options::="--force-confold" \
+      "${packages[@]}"
 }
 
 ensure_download_tools() {
@@ -151,14 +200,17 @@ ensure_docker() {
 
 ensure_k3s_server() {
   if command_exists k3s; then
-    echo "==> k3s is already installed"
+    echo "==> K3s is already installed – ensuring service is running"
   else
     ensure_download_tools
 
-    echo "==> Installing k3s (server mode)"
-    curl -sfL https://get.k3s.io | sh -s - server \
-      --write-kubeconfig-mode=644 \
-      --cluster-init
+    # _do_install_k3s_server is a helper so run_with_spinner can wrap the pipe
+    _do_install_k3s_server() {
+      curl -sfL https://get.k3s.io | sh -s - server \
+        --write-kubeconfig-mode=644 \
+        --cluster-init
+    }
+    run_with_spinner "Installing K3s server" _do_install_k3s_server
   fi
 
   if command_exists systemctl; then
@@ -198,8 +250,10 @@ ensure_helm() {
 
   ensure_download_tools
 
-  echo "==> Installing Helm"
-  curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  _do_install_helm() {
+    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  }
+  run_with_spinner "Installing Helm" _do_install_helm
 }
 
 # =============================================================================
@@ -309,27 +363,31 @@ print_versions() {
 # =============================================================================
 
 verify_cluster() {
-  echo "==> Verifying k3s cluster access"
+  # Helper wrapped by the spinner so the retry loop output goes to the log
+  _wait_for_cluster() {
+    local retries=10
+    local wait_secs=6
+    for i in $(seq 1 "${retries}"); do
+      if "${KUBECTL_CMD[@]}" get nodes >/dev/null 2>&1; then
+        echo "Cluster reachable after ${i} attempt(s)."
+        return 0
+      fi
+      echo "  Waiting for k3s to be ready... (${i}/${retries})"
+      sleep "${wait_secs}"
+      if [ "${i}" -eq "${retries}" ]; then
+        echo "ERROR: kubectl cannot reach the local k3s cluster after ${retries} attempts." >&2
+        return 1
+      fi
+    done
+  }
 
-  local retries=10
-  local wait=6
-  for i in $(seq 1 "${retries}"); do
-    if "${KUBECTL_CMD[@]}" get nodes >/dev/null 2>&1; then
-      echo "==> Cluster is reachable"
-      break
-    fi
-    echo "    Waiting for k3s to be ready... (${i}/${retries})"
-    sleep "${wait}"
-    if [ "${i}" -eq "${retries}" ]; then
-      echo "ERROR: kubectl cannot reach the local k3s cluster after ${retries} attempts." >&2
-      exit 1
-    fi
-  done
+  run_with_spinner "Waiting for K3s cluster to be ready (up to 60s)" _wait_for_cluster
 
   if ! as_root k3s ctr images list >/dev/null 2>&1; then
     echo "ERROR: k3s containerd is not reachable via 'k3s ctr'." >&2
     exit 1
   fi
+  echo "==> Cluster and containerd are reachable"
 }
 
 # =============================================================================
@@ -338,29 +396,34 @@ verify_cluster() {
 
 deploy_edgekit_server() {
   print_section "BUILDING & DEPLOYING EDGEKIT SERVER IMAGE"
+  echo "  Log file: ${LOG_FILE}"
 
-  echo "==> Building EdgeKit server image: ${SERVER_IMAGE}"
-  echo "==> Writing log to ${LOG_FILE}"
+  # Helper functions so run_with_spinner can wrap pipes and multi-command steps
+  _do_docker_build_server() {
+    "${DOCKER_CMD[@]}" build \
+      --tag "${SERVER_IMAGE}" \
+      --file "${REPO_ROOT}/server/Dockerfile" \
+      "${REPO_ROOT}/server"
+  }
 
-  "${DOCKER_CMD[@]}" build \
-    --tag "${SERVER_IMAGE}" \
-    --file "${REPO_ROOT}/server/Dockerfile" \
-    "${REPO_ROOT}/server"
+  _do_import_server_image() {
+    "${DOCKER_CMD[@]}" save "${SERVER_IMAGE}" | as_root k3s ctr images import -
+  }
 
-  echo ""
-  echo "==> Importing server image into k3s containerd"
-  "${DOCKER_CMD[@]}" save "${SERVER_IMAGE}" | as_root k3s ctr images import -
+  _do_helm_deploy_server() {
+    helm upgrade --install "${RELEASE_NAME}" "${REPO_ROOT}/helm/edgekit" \
+      --namespace "${NAMESPACE}" \
+      --create-namespace \
+      --set server.image.repository=edgekit-server \
+      --set server.image.tag="${IMAGE_TAG}" \
+      --set server.image.pullPolicy=IfNotPresent \
+      --set client.replicaCount=0 \
+      --wait
+  }
 
-  echo ""
-  echo "==> Deploying EdgeKit with Helm (server only)"
-  helm upgrade --install "${RELEASE_NAME}" "${REPO_ROOT}/helm/edgekit" \
-    --namespace "${NAMESPACE}" \
-    --create-namespace \
-    --set server.image.repository=edgekit-server \
-    --set server.image.tag="${IMAGE_TAG}" \
-    --set server.image.pullPolicy=IfNotPresent \
-    --set client.replicaCount=0 \
-    --wait
+  run_with_spinner "Building Docker server image" _do_docker_build_server
+  run_with_spinner "Importing server image into containerd" _do_import_server_image
+  run_with_spinner "Deploying Helm chart (server only)" _do_helm_deploy_server
 
   echo ""
   echo "==> Deployment status"
@@ -420,11 +483,14 @@ run_server_tests() {
   fi
 
   # Test 4 – Docker image exists in k3s containerd store
-  echo "[TEST 4/4] Server image is present in k3s containerd..."
-  if as_root k3s ctr images list 2>/dev/null | grep -q "edgekit-server"; then
-    echo "  PASS – Server image found in containerd store"
+  # NOTE: Kubernetes stores images in the "k8s.io" containerd namespace, NOT the default
+  # namespace. Without "-n k8s.io", k3s ctr images list returns an empty set even when the
+  # image is correctly imported, causing a false-positive FAIL.
+  echo "[TEST 4/4] Server image is present in k3s containerd (k8s.io namespace)..."
+  if as_root k3s ctr -n k8s.io images list 2>/dev/null | grep -q "edgekit-server"; then
+    echo "  PASS – Server image found in containerd store (k8s.io namespace)"
   else
-    echo "  FAIL – Server image NOT found in containerd store"
+    echo "  FAIL – Server image NOT found in containerd store (k8s.io namespace)"
     failed=$((failed + 1))
   fi
 
@@ -494,6 +560,11 @@ DOCKER_CMD=("${DOCKER_BIN}")
 echo ""
 echo "============================================================"
 echo "  EdgeKit – K3s Master (Server) Node Setup"
+if [ "${VERBOSE}" = "1" ]; then
+echo "  Mode    : VERBOSE (full output)"
+else
+echo "  Mode    : Spinner (full log: ${LOG_FILE})"
+fi
 echo "============================================================"
 
 verify_architecture
