@@ -1,440 +1,181 @@
-# Test EdgeKit on local k3s
+# Test EdgeKit on Multi-Node Local K3s (Master & Worker)
 
-This document describes the `k3s-local` test: building EdgeKit images on the current machine, importing them into the k3s containerd, and deploying the local Helm chart.
+This document describes how to deploy and test EdgeKit in a local K3s cluster split into a Master (Server) node and a Worker (Client) node.
 
-The test can be run with a single script:
-
-```bash
-chmod +x ./scripts/k3s-local.sh
-./scripts/k3s-local.sh
-```
-
-If Docker, k3s, kubectl, or Helm are missing, the script attempts to install them automatically on Linux systems using `apt`, such as Ubuntu Server, Debian, or Raspberry Pi OS.
-
-On other distributions, the script is still usable, but prerequisites must be installed manually if tools are missing.
+Instead of a single script, the setup is split into two distinct scripts to support multi-node configurations (e.g., a x86_64 Master and an ARM-based Raspberry Pi Worker connected via LAN or Ethernet).
 
 ---
 
-## What k3s-local means
+## Architecture Overview
 
-`k3s-local` means:
-
-- the EdgeKit repository is present locally;
-- Docker images are built locally;
-- images are imported into the local k3s containerd;
-- Helm deploys the local chart `helm/edgekit`;
-- no external registry is needed.
-
-This is not tied to a specific Ubuntu Server image. Ubuntu Server is only provided as a practical example to get started quickly.
+- **Master Node (Server)**: Runs the K3s server, hosts the Eclipse Mosquitto MQTT broker, and manages the Helm deployment.
+- **Worker Node (Client)**: Runs the K3s agent, builds the local EdgeKit client image, and registers with the Master node to run the edge agent pods.
 
 ---
 
-## Supported systems
+## Supported Systems & Architectures
 
-The script can run the test on any Linux machine or VM having:
+### Master Node (`scripts/k3s-master.sh`)
+- **Constraint**: Must run on **x86_64 / AMD64** architectures.
+- **OS Support**: Any Linux distribution with Docker and K3s. Automatic installation of missing components is supported on `apt`-based systems (Ubuntu Server, Debian).
 
-- Docker;
-- local k3s;
-- kubectl configured to access the k3s cluster;
-- Helm;
-- root access via `sudo` or a root session.
-
-The script can automatically install missing components only if the system uses `apt`.
-
-Automatic installation is tested or planned for:
-
-- Ubuntu Server LTS `amd64`;
-- Ubuntu Server LTS `arm64`;
-- Debian `amd64` or `arm64`;
-- Raspberry Pi OS 64-bit.
-
-Target architectures:
-
-- `x86_64` / `amd64`;
-- `aarch64` / `arm64`.
-
-Verify your architecture:
-
-```bash
-uname -m
-```
+### Worker Node (`scripts/k3s-worker.sh`)
+- **Constraint**: Supports both **ARM** (aarch64/arm64, armv7l) and **x86_64 / AMD64** architectures.
+- **OS Support**: Any Linux distribution. Tested on Raspberry Pi OS (64-bit), Ubuntu Server ARM64/AMD64, and Debian. Automatic installation of missing components is supported on `apt`-based systems.
 
 ---
 
-## Quick start
+## Quick Start
 
-From the repository:
+### 1. Setup the Master Node (Server)
+
+On the Master machine (x86_64):
 
 ```bash
-chmod +x ./scripts/k3s-local.sh
-./scripts/k3s-local.sh
+chmod +x ./scripts/k3s-master.sh
+./scripts/k3s-master.sh
 ```
 
-The script writes a timestamped log:
+#### What the Master script does:
+1. **Verifies Architecture**: Ensures the machine is x86_64 / AMD64.
+2. **Installs Prerequisites**: Checks and installs `curl`, `ca-certificates`, `docker.io`, `k3s` (in server mode with `--cluster-init`), `kubectl`, and `helm` (on `apt`-based systems).
+3. **Displays System/Technology Versions**: Prints OS, Kernel, CPU, RAM, Node.js, Python, Docker, K3s, and network details.
+4. **Builds & Imports Server Image**: Builds `edgekit-server:k3s-local` and imports it into the K3s containerd store.
+5. **Deploys Helm Chart**: Installs the local chart `helm/edgekit` with client replicas scaled to `0` (client pods will run on the Worker).
+6. **Runs Automated Tests**:
+   - Verifies the Master node status is `Ready`.
+   - Verifies the server pod is running.
+   - Verifies the server service is active.
+   - Verifies the image exists in containerd.
+7. **Generates Worker Connection Parameters**: Displays the exact command and credentials (`MASTER_IP` and `K3S_TOKEN`) needed for the Worker node to join.
+
+At the end of execution, you will see a connection block like this:
 
 ```text
-logs/k3s-local-YYYYMMDD-HHMMSS.log
+  ┌─────────────────────────────────────────────────────────────┐
+  │  MASTER_IP    = 192.168.1.50
+  │  K3S_TOKEN    = K1077e6...::server:a4c5b...
+  └─────────────────────────────────────────────────────────────┘
+
+  On the Worker machine, run:
+
+    bash scripts/k3s-worker.sh \
+      --master-ip "192.168.1.50" \
+      --token "K1077e6...::server:a4c5b..."
 ```
 
 ---
 
-## What the script does
+### 2. Setup the Worker Node (Client)
 
-### 1. Detect architecture
-
-Equivalent command:
-
-```bash
-uname -m
-```
-
-Why:
-
-- The test is designed for AMD64 and ARM64.
-- Images are built directly on the target machine.
-
-### 2. Install base packages if necessary
-
-If the system uses `apt`, the script installs what is missing to run the test:
-
-```text
-curl
-ca-certificates
-docker.io
-```
-
-Equivalent command:
+Copy the repository to the Worker machine (via `git clone`, `rsync`, etc.).
+Run the worker script using the IP and Token provided by the Master node:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y curl ca-certificates docker.io
+chmod +x ./scripts/k3s-worker.sh
+./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>"
 ```
 
-Why:
-
-- `curl` downloads k3s and Helm scripts.
-- `ca-certificates` prevents TLS errors.
-- `docker.io` builds local images.
-
-`git` is not installed by the script, as the repository must already be present to run `./scripts/k3s-local.sh`. On a fresh machine, install `git` before cloning the repository.
-
-If the system does not use `apt`, the script does not force an incompatible installation. It displays the missing tools and stops.
-
-### 3. Start Docker
-
-If `systemctl` is available, the script attempts:
-
-```bash
-sudo systemctl enable --now docker
-```
-
-Then it tests:
-
-```bash
-docker info
-```
-
-If the current user does not yet have Docker access, the script automatically tries:
-
-```bash
-sudo docker info
-```
-
-Why:
-
-- On a freshly installed machine, the user might not be in the Docker group yet.
-- The test can work without needing to log out and back in.
-
-### 4. Install k3s if necessary
-
-If `k3s` is missing, the script executes:
-
-```bash
-curl -sfL https://get.k3s.io | sh -s - server --write-kubeconfig-mode=644
-```
-
-Why:
-
-- k3s provides the local Kubernetes cluster.
-- `--write-kubeconfig-mode=644` facilitates use by `kubectl` and Helm.
-
-The script then prepares the kubeconfig:
-
-```bash
-mkdir -p ~/.kube
-sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-sudo chown "$(id -u):$(id -g)" ~/.kube/config
-```
-
-### 5. Install Helm if necessary
-
-If `helm` is missing, the script executes:
-
-```bash
-curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-```
-
-Why:
-
-- EdgeKit already provides a local Helm chart in `helm/edgekit`.
-- Helm manages deployment installation and updates.
-
-### 6. Verify k3s
-
-Equivalent commands:
-
-```bash
-kubectl get nodes
-sudo k3s ctr images list
-```
-
-Why:
-
-- `kubectl get nodes` confirms that the cluster is reachable.
-- `k3s ctr images list` confirms that the k3s containerd is accessible to import images.
-
-### 7. Build images
-
-Equivalent commands:
-
-```bash
-docker build --tag edgekit-server:k3s-local --file ./server/Dockerfile ./server
-docker build --tag edgekit-client:k3s-local --file ./client/Dockerfile ./client
-```
-
-Why:
-
-- Images are built on the machine that will execute them.
-- On AMD64, Docker produces AMD64 images.
-- On ARM64, Docker produces ARM64 images.
-
-### 8. Import images into k3s
-
-Equivalent commands:
-
-```bash
-docker save edgekit-server:k3s-local | sudo k3s ctr images import -
-docker save edgekit-client:k3s-local | sudo k3s ctr images import -
-```
-
-Why:
-
-- Docker and k3s do not use the same image storage.
-- k3s runs pods with containerd.
-- The import makes local images visible to k3s without going through GHCR or Docker Hub.
-
-### 9. Deploy with Helm
-
-Equivalent command:
-
-```bash
-helm upgrade --install edgekit ./helm/edgekit \
-  --namespace edgekit \
-  --create-namespace \
-  --set server.image.repository=edgekit-server \
-  --set server.image.tag=k3s-local \
-  --set server.image.pullPolicy=IfNotPresent \
-  --set client.image.repository=edgekit-client \
-  --set client.image.tag=k3s-local \
-  --set client.image.pullPolicy=IfNotPresent \
-  --set client.replicaCount=1 \
-  --set client.publishIntervalMs=5000 \
-  --wait
-```
-
-Why:
-
-- `helm upgrade --install` installs if missing and updates if already present.
-- The `edgekit` namespace isolates the test.
-- `image.*` values force the use of imported local images.
-- `pullPolicy=IfNotPresent` prevents k3s from looking for these test images on the Internet.
-
----
-
-## Fresh Raspberry Pi example
-
-After the first SSH login:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y git
-git clone https://github.com/perspikapps/edgekit.git
-cd edgekit
-chmod +x ./scripts/k3s-local.sh
-./scripts/k3s-local.sh
-```
-
-The script then installs Docker, k3s, and Helm if necessary.
-
-For Raspberry Pi, preferably use:
-
-- Raspberry Pi OS 64-bit;
-- Ubuntu Server arm64;
-- a stable power supply;
-- a fast SD card or a USB SSD.
+#### What the Worker script does:
+1. **Verifies Architecture**: Accepts ARM64, ARMv7, and x86_64.
+2. **Fixes Raspberry Pi cgroups**: If running on a Raspberry Pi and cgroups memory/cpuset limit options are missing in `/boot/cmdline.txt` or `/boot/firmware/cmdline.txt`, the script configures them and prompts for a system reboot.
+3. **Installs Prerequisites**: Installs `docker.io` and `k3s` (configured in agent/worker mode pointing to the Master).
+4. **Displays System/Technology Versions**: Prints OS, Hardware, Node.js, Docker, and K3s agent information.
+5. **Builds & Imports Client Image**: Builds `edgekit-client:k3s-local` and imports it into the K3s agent containerd store.
+6. **Runs Automated Connection & Functionality Tests**:
+   - Verifies network connectivity to the Master API server on port 6443.
+   - Verifies the K3s agent service/process is active.
+   - Verifies the node registers successfully in the K3s cluster.
+   - Verifies the client image is correctly imported.
+   - Verifies K3s containerd is reachable.
 
 ---
 
 ## Verification
 
-View resources:
+Once both scripts have completed successfully, run the following verification steps on the **Master Node**:
+
+### Check Nodes status
+```bash
+kubectl get nodes -o wide
+```
+You should see both your Master node and Worker node listed as `Ready`.
+
+### Scale and verify Client Pods
+The Master Helm deployment has `client.replicaCount=0` by default. You can scale the client pods to run on the Worker nodes:
 
 ```bash
-kubectl -n edgekit get pods,svc,pvc
+helm upgrade edgekit ./helm/edgekit \
+  --namespace edgekit \
+  --set client.replicaCount=2
 ```
 
-View client logs:
-
+Check where the pods are running:
 ```bash
-kubectl -n edgekit logs -f -l app.kubernetes.io/component=client
+kubectl -n edgekit get pods -o wide
 ```
+The client pods should now be scheduled and running on the Worker node.
 
-View server logs:
-
+### View Logs
+To view logs from the server component (running on the Master):
 ```bash
 kubectl -n edgekit logs -f -l app.kubernetes.io/component=server
 ```
 
-The client must connect to:
-
-```text
-ws://edgekit-server:9001
-```
-
-### Optional: inspect published JSON payloads
-
-This check lets you read the JSON payloads published by `edgekit-client` on MQTT topics.
-
-The `edgekit-server` `Service` is a `ClusterIP`, so it is not directly exposed on the host. Use `kubectl port-forward` to access it locally.
-
-Important:
-
-- port `1883` is plain MQTT over TCP;
-- port `9001` is MQTT over WebSocket;
-- `mosquitto_sub` uses plain MQTT here, so forward port `1883`.
-
-Terminal 1, keep this command running:
-
+To view logs from the client agents (running on the Worker):
 ```bash
-kubectl -n edgekit port-forward svc/edgekit-server 1883:1883
-```
-
-Expected output:
-
-```text
-Forwarding from 127.0.0.1:1883 -> 1883
-Forwarding from [::1]:1883 -> 1883
-```
-
-Terminal 2, install `jq` to format JSON:
-
-```bash
-sudo apt-get install -y jq
-```
-
-Then subscribe to MQTT topics:
-
-```bash
-sudo docker run --rm --network host eclipse-mosquitto:2.0 \
-  mosquitto_sub -h 127.0.0.1 -p 1883 -t "edgekit/#" -v \
-| while read -r topic payload; do
-    echo "TOPIC: $topic"
-    echo "$payload" | jq .
-  done
-```
-
-Why:
-
-- `kubectl port-forward` makes the internal `Service` reachable from `127.0.0.1`;
-- `mosquitto_sub` listens to all topics under `edgekit/#`;
-- `jq` prints the JSON payload in a readable format.
-
-Example output:
-
-```text
-TOPIC: edgekit/edgekit-client-7b68478f8-snhpl/metrics
-{
-  "clientId": "edgekit-client-7b68478f8-snhpl",
-  "timestamp": "2026-06-05T17:27:55.306Z",
-  "cpu": {
-    "loadPercent": 5.71,
-    "cores": 2
-  },
-  "memory": {
-    "usedPercent": 93.67
-  }
-}
+kubectl -n edgekit logs -f -l app.kubernetes.io/component=client
 ```
 
 ---
 
-## Test options
+## Advanced Options
 
-Deploy three clients:
+Both scripts accept optional customization via environment variables.
 
+### Deploying multiple clients
+Run this on the Master node to deploy 3 clients by default:
 ```bash
-CLIENT_REPLICAS=3 ./scripts/k3s-local.sh
+CLIENT_REPLICAS=3 ./scripts/k3s-master.sh
 ```
 
-Change the publish interval to 10 seconds:
-
+### Changing client publish interval
 ```bash
-PUBLISH_INTERVAL_MS=10000 ./scripts/k3s-local.sh
+PUBLISH_INTERVAL_MS=10000 ./scripts/k3s-master.sh
 ```
 
-Use a different image tag:
-
+### Using custom tags
+Ensure you pass the same `IMAGE_TAG` to both scripts if you want to override the default `k3s-local` tag:
 ```bash
-IMAGE_TAG=test-001 ./scripts/k3s-local.sh
-```
+# On Master
+IMAGE_TAG=custom-v1 ./scripts/k3s-master.sh
 
-Use a different namespace or release:
-
-```bash
-NAMESPACE=edgekit-dev RELEASE_NAME=edgekit-dev ./scripts/k3s-local.sh
+# On Worker
+IMAGE_TAG=custom-v1 ./scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN>
 ```
 
 ---
 
-## Replay after code modification
+## Log Files
 
-```bash
-./scripts/k3s-local.sh
-```
-
-Why:
-
-- images are rebuilt;
-- images are reimported into k3s;
-- Helm reapplies the deployment.
-
-If the same tag is reused and Kubernetes does not restart the pods:
-
-```bash
-kubectl -n edgekit rollout restart deployment/edgekit-server
-kubectl -n edgekit rollout restart deployment/edgekit-client
-```
+Logs are written under the `logs/` directory in the repository root:
+- Master log: `logs/k3s-master-YYYYMMDD-HHMMSS.log`
+- Worker log: `logs/k3s-worker-YYYYMMDD-HHMMSS.log`
 
 ---
 
 ## Uninstallation
 
-```bash
-helm uninstall edgekit --namespace edgekit
-kubectl delete namespace edgekit
-```
+To cleanly stop the cluster and remove EdgeKit:
 
----
+1. **Uninstall Helm deployment** (on Master):
+   ```bash
+   helm uninstall edgekit --namespace edgekit
+   kubectl delete namespace edgekit
+   ```
 
-## Important limitation
-
-This mode is designed for a single-machine local test.
-
-For a multi-node cluster or production use, publishing versioned images to a registry is preferable:
-
-```bash
-docker build -t ghcr.io/<org>/edgekit-server:1.0.0 ./server
-docker build -t ghcr.io/<org>/edgekit-client:1.0.0 ./client
-docker push ghcr.io/<org>/edgekit-server:1.0.0
-docker push ghcr.io/<org>/edgekit-client:1.0.0
-```
+2. **Clean up Worker Node** (on Worker):
+   If you wish to stop the K3s agent service:
+   ```bash
+   sudo systemctl disable --now k3s-agent
+   ```

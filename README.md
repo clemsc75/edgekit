@@ -111,28 +111,32 @@ helm install edgekit ./helm/edgekit \
   --create-namespace
 ```
 
-### Local k3s test deploy
+### Local k3s test deploy (Multi-Node Master/Worker)
 
-Run the local k3s test with one script. It installs missing prerequisites
-automatically on apt-based Linux systems, then builds the local Docker images,
-imports them into k3s containerd, deploys the local Helm chart, and writes a
-deployment log.
+Run the local K3s test using two separate scripts to simulate a Master (Server) and a Worker (Client) node.
 
+**1. On the Master Node (x86_64 only):**
 ```bash
-chmod +x ./scripts/k3s-local.sh
-./scripts/k3s-local.sh
+chmod +x ./scripts/k3s-master.sh
+./scripts/k3s-master.sh
+```
+This script will print out the IP and Token parameters to run on the Worker node:
+
+**2. On the Worker Node (ARM or x86_64):**
+```bash
+chmod +x ./scripts/k3s-worker.sh
+./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>"
 ```
 
-Optional variables:
-
+Optional variables on Master:
 ```bash
-IMAGE_TAG=test-1 CLIENT_REPLICAS=3 ./scripts/k3s-local.sh
+IMAGE_TAG=test-1 CLIENT_REPLICAS=3 ./scripts/k3s-master.sh
 ```
 
 Logs are written under `logs/`.
 
 For the complete walkthrough and OS compatibility notes, see
-[docs/k3s-local-deploy.md](docs/k3s-local-deploy.md).
+[docs/en/k3s-local-deploy.md](docs/en/k3s-local-deploy.md).
 
 ### Verify
 
@@ -182,7 +186,8 @@ edgekit/
 │       └── templates/
 ├── scripts/
 │   ├── build.sh             # Build Docker images
-│   ├── k3s-local.sh         # Prepare and run local k3s test deployment
+│   ├── k3s-master.sh        # Configure K3s Master/Server node
+│   ├── k3s-worker.sh        # Configure K3s Worker/Agent node
 │   ├── start-local.sh       # Start via docker compose
 │   └── stop-local.sh        # Stop local stack
 ├── .github/
