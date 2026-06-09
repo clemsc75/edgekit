@@ -12,6 +12,8 @@
 # Optional flags:
 #   --verbose, -v        Print all command output to the terminal (no spinner).
 #                        Useful for debugging if the spinner freezes.
+#   --skip-firewall, -F  Do NOT modify UFW/iptables rules or sysctl IP forwarding.
+#                        Use this if you manage your own firewall configuration.
 #
 # Optional environment variables:
 #   NAMESPACE            – Kubernetes namespace          (default: edgekit)
@@ -22,6 +24,7 @@
 #   LOG_DIR              – Directory for log files        (default: <repo>/logs)
 #   DOCKER_BIN           – Docker binary override        (default: docker)
 #   VERBOSE              – Set to 1 to disable spinner    (same as --verbose)
+#   SKIP_FIREWALL        – Set to 1 to skip firewall      (same as --skip-firewall)
 # =============================================================================
 set -euo pipefail
 
@@ -32,23 +35,25 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # =============================================================================
 
 VERBOSE="${VERBOSE:-0}"
+SKIP_FIREWALL="${SKIP_FIREWALL:-0}"
 MASTER_IP=""
 K3S_TOKEN=""
 
 usage() {
   echo ""
-  echo "Usage: bash scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN> [--verbose]"
+  echo "Usage: bash scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN> [--verbose] [--skip-firewall]"
   echo ""
   echo "Required arguments:"
   echo "  --master-ip <IP>     IP address of the K3s master node"
   echo "  --token <TOKEN>      Join token from the master (shown by k3s-master.sh)"
   echo ""
   echo "Optional flags:"
-  echo "  --verbose, -v        Show full command output (debug mode, no spinner)"
+  echo "  --verbose,       -v  Show full command output (debug mode, no spinner)"
+  echo "  --skip-firewall, -F  Skip UFW/iptables configuration"
   echo ""
   echo "Optional environment variables:"
   echo "  NAMESPACE, RELEASE_NAME, IMAGE_TAG, CLIENT_REPLICAS,"
-  echo "  PUBLISH_INTERVAL_MS, LOG_DIR, DOCKER_BIN, VERBOSE"
+  echo "  PUBLISH_INTERVAL_MS, LOG_DIR, DOCKER_BIN, VERBOSE, SKIP_FIREWALL"
   echo ""
   exit 1
 }
@@ -67,6 +72,10 @@ while [[ $# -gt 0 ]]; do
       VERBOSE=1
       shift
       ;;
+    --skip-firewall|-F)
+      SKIP_FIREWALL=1
+      shift
+      ;;
     -h|--help)
       usage
       ;;
@@ -77,7 +86,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export VERBOSE
+export VERBOSE SKIP_FIREWALL
 
 if [ -z "${MASTER_IP}" ] || [ -z "${K3S_TOKEN}" ]; then
   echo "ERROR: --master-ip and --token are both required." >&2
@@ -196,6 +205,81 @@ ensure_pi_cgroups() {
 }
 
 # =============================================================================
+# Firewall configuration (UFW / IP forwarding)
+# =============================================================================
+
+# K3s worker required open ports:
+#   8472/UDP  – Flannel VXLAN   (inter-node pod traffic)
+#  10250/TCP  – Kubelet API     (metrics, exec, log streaming from master)
+# NOTE: port 6443 is called OUT by the worker to the master; ufw allows
+# outbound connections by default, so no rule is needed for it.
+
+ensure_firewall_rules() {
+  if [ "${SKIP_FIREWALL:-0}" = "1" ]; then
+    echo "==> --skip-firewall set: skipping firewall configuration"
+    return
+  fi
+
+  print_section "CONFIGURING FIREWALL RULES FOR K3s (WORKER)"
+
+  # 1. Enable IP forwarding – required for Flannel to route packets between pods
+  local sysctl_conf="/etc/sysctl.d/99-k3s-edgekit.conf"
+  if [ -f "${sysctl_conf}" ] && grep -q "net.ipv4.ip_forward=1" "${sysctl_conf}" 2>/dev/null; then
+    echo "==> IP forwarding already configured (${sysctl_conf})"
+  else
+    echo "==> Enabling IP forwarding..."
+    echo "net.ipv4.ip_forward=1" | as_root tee "${sysctl_conf}" >/dev/null
+    as_root sysctl --system >/dev/null 2>&1 || true
+    echo "    Done."
+  fi
+
+  # 2. UFW rules
+  # --- Check A: does the ufw binary exist? ---
+  if ! command -v ufw >/dev/null 2>&1; then
+    echo "==> UFW is not installed or not in PATH – skipping UFW configuration"
+    echo "    (K3s ports to open manually if needed: 8472/udp, 10250/tcp)"
+  else
+    # --- Check B: is ufw currently active? ---
+    # IMPORTANT: we run 'ufw status' first with '|| true' so that ANY failure
+    # (permission denied, ufw daemon not running, etc.) is silently swallowed
+    # and never triggers 'set -e'. Only then do we grep the captured output.
+    local _ufw_raw
+    _ufw_raw=$(as_root ufw status 2>/dev/null || true)
+
+    if ! echo "${_ufw_raw}" | grep -q "Status: active"; then
+      echo "==> UFW is installed but not active – skipping UFW rules"
+      echo "    (Tip: if you activate UFW later, rerun this script or open ports manually)"
+    else
+      echo "==> UFW is active – adding K3s required port rules..."
+      # Each rule uses '|| true': adding an already-existing rule exits 0 in newer
+      # UFW but may exit 1 on older versions, so we never let it abort the script.
+      as_root ufw allow 8472/udp  comment 'K3s Flannel VXLAN' >/dev/null 2>&1 || true
+      as_root ufw allow 10250/tcp comment 'K3s Kubelet API'   >/dev/null 2>&1 || true
+      as_root ufw reload >/dev/null 2>&1 || true
+      echo "    Rules applied (8472/udp, 10250/tcp) and UFW reloaded."
+    fi
+  fi
+
+  # 3. iptables FORWARD rules for Flannel pod CIDR (belt-and-suspenders)
+  # UFW's DEFAULT_FORWARD_POLICY=DROP can override K3s/Flannel's own FORWARD rules.
+  # We insert explicit ACCEPT entries for the K3s pod CIDR (10.42.0.0/16).
+  # 'if ! iptables -C ...' is safe with set -e because 'if' conditions are exempt.
+  if ! command -v iptables >/dev/null 2>&1; then
+    echo "==> iptables not found – skipping FORWARD rules"
+  else
+    if ! as_root iptables -C FORWARD -s 10.42.0.0/16 -j ACCEPT >/dev/null 2>&1; then
+      as_root iptables -I FORWARD -s 10.42.0.0/16 -j ACCEPT >/dev/null 2>&1 || true
+      as_root iptables -I FORWARD -d 10.42.0.0/16 -j ACCEPT >/dev/null 2>&1 || true
+      echo "==> iptables FORWARD rules added for K3s pod CIDR (10.42.0.0/16)"
+    else
+      echo "==> iptables FORWARD rules already present – skipping"
+    fi
+  fi
+
+  echo "==> Firewall configuration complete."
+}
+
+# =============================================================================
 # Package / tool installation helpers
 # =============================================================================
 
@@ -281,17 +365,23 @@ ensure_k3s_agent() {
   # - First run  → installs the binary and creates the systemd service.
   # - Subsequent runs → updates K3S_URL and K3S_TOKEN in the service and restarts the agent.
   # This means relaunching the script with a new --master-ip automatically reconnects the worker.
+  #
+  # INSTALL_K3S_EXEC persists the --node-label flag in the K3s systemd service unit.
+  # This means the label is re-applied every time the k3s-agent service starts,
+  # making it fully idempotent without requiring kubectl access on the Worker node.
   _do_install_k3s_agent() {
     curl -sfL https://get.k3s.io | \
       K3S_URL="https://${MASTER_IP}:6443" \
       K3S_TOKEN="${K3S_TOKEN}" \
-      sh -s - agent
+      INSTALL_K3S_EXEC="agent --node-label edgekit.io/role=worker" \
+      sh -
   }
-  run_with_spinner "Installing/updating K3s agent" _do_install_k3s_agent
+  run_with_spinner "Installing/updating K3s agent (with node label edgekit.io/role=worker)" _do_install_k3s_agent
 
   if command_exists systemctl && systemctl is-active --quiet k3s-agent 2>/dev/null; then
     echo "==> k3s agent service is active"
   fi
+  echo "==> Node label 'edgekit.io/role=worker' will be applied on agent start."
 }
 
 # =============================================================================
@@ -476,8 +566,15 @@ run_worker_tests() {
   # NOTE: Kubernetes stores images in the "k8s.io" containerd namespace, NOT the default
   # namespace. Without "-n k8s.io", k3s ctr images list returns an empty set even when the
   # image is correctly imported, causing a false-positive FAIL.
+  #
+  # FIX: We capture the output into a variable FIRST, then grep the variable.
+  # Piping directly from 'as_root' (a shell function) through '|' triggers a subshell
+  # that, combined with 'set -o pipefail' and the exec-level tee redirect, can silently
+  # return a non-zero exit code even when the image is present.
   echo "[TEST 4/5] Client image is present in k3s containerd (k8s.io namespace)..."
-  if as_root k3s ctr -n k8s.io images list 2>/dev/null | grep -q "edgekit-client"; then
+  local img_list_worker
+  img_list_worker=$(as_root k3s ctr -n k8s.io images list 2>/dev/null) || true
+  if echo "${img_list_worker}" | grep -q "edgekit-client"; then
     echo "  PASS – Client image found in containerd store (k8s.io namespace)"
   else
     echo "  FAIL – Client image NOT found in containerd store (k8s.io namespace)"
@@ -545,10 +642,14 @@ echo "  Mode    : VERBOSE (full output)"
 else
 echo "  Mode    : Spinner (full log: ${LOG_FILE})"
 fi
+if [ "${SKIP_FIREWALL}" = "1" ]; then
+echo "  Firewall: SKIPPED (--skip-firewall)"
+fi
 echo "============================================================"
 
 verify_architecture
 ensure_pi_cgroups
+ensure_firewall_rules
 ensure_base_packages
 ensure_docker
 ensure_k3s_agent

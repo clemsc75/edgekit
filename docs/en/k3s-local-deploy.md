@@ -1,223 +1,422 @@
-# Test EdgeKit on Multi-Node Local K3s (Master & Worker)
+# EdgeKit — Local K3s Deployment Guide (Master & Worker)
 
-This document describes how to deploy and test EdgeKit in a local K3s cluster split into a Master (Server) node and a Worker (Client) node.
-
-Instead of a single script, the setup is split into two distinct scripts to support multi-node configurations (e.g., a x86_64 Master and an ARM-based Raspberry Pi Worker connected via LAN or Ethernet).
+> **Goal:** Deploy and test a full EdgeKit cluster on real hardware — an x86 Master and an ARM Worker (e.g. a Raspberry Pi) — using two automated, self-contained Bash scripts.
 
 ---
 
-## Architecture Overview
+## Architecture
 
-- **Master Node (Server)**: Runs the K3s server, hosts the Eclipse Mosquitto MQTT broker, and manages the Helm deployment.
-- **Worker Node (Client)**: Runs the K3s agent, builds the local EdgeKit client image, and registers with the Master node to run the edge agent pods.
+```
+                    YOUR LOCAL NETWORK (LAN / Ethernet)
+   ┌──────────────────────────────────────────────────────┐
+   │                                                      │
+   │  ┌────────────────────────┐   ┌──────────────────┐  │
+   │  │   MASTER NODE (x86)    │   │  WORKER NODE     │  │
+   │  │                        │   │  (ARM or x86)    │  │
+   │  │  ┌──────────────────┐  │   │                  │  │
+   │  │  │ K3s Server       │◄─┼───┤ K3s Agent        │  │
+   │  │  │  (control plane) │  │   │  (label:         │  │
+   │  │  └──────────────────┘  │   │   edgekit.io/    │  │
+   │  │                        │   │   role=worker)   │  │
+   │  │  ┌──────────────────┐  │   │                  │  │
+   │  │  │ edgekit-server   │  │   │  ┌────────────┐  │  │
+   │  │  │ (Mosquitto MQTT) │◄─┼───┼──┤edgekit-    │  │  │
+   │  │  │ port 1883 / 9001 │  │   │  │client      │  │  │
+   │  │  └──────────────────┘  │   │  │(edge agent)│  │  │
+   │  │                        │   │  └────────────┘  │  │
+   │  │  k3s-master.sh             │   │  k3s-worker.sh   │  │
+   │  └────────────────────────┘   └──────────────────┘  │
+   │                                                      │
+   └──────────────────────────────────────────────────────┘
+```
+
+| Node | Role | Architecture | Script |
+|---|---|---|---|
+| **Master** | K3s server · MQTT broker · Helm manager | x86_64 / AMD64 only | `k3s-master.sh` |
+| **Worker** | K3s agent · Edge agent | ARM64, ARMv7, or x86_64 | `k3s-worker.sh` |
+
+> [!IMPORTANT]
+> The **Master** must be x86_64. The **Worker** can be ARM (Raspberry Pi) or x86_64. Both must be on the same network with IP reachability.
 
 ---
 
-## Supported Systems & Architectures
+## The Zero-Touch Deployment
 
-### Master Node (`scripts/k3s-master.sh`)
-- **Constraint**: Must run on **x86_64 / AMD64** architectures.
-- **OS Support**: Any Linux distribution with Docker and K3s. Automatic installation of missing components is supported on `apt`-based systems (Ubuntu Server, Debian).
+This is the key concept. You run both scripts independently — you never need to manually upgrade the Helm chart or restart anything.
 
-### Worker Node (`scripts/k3s-worker.sh`)
-- **Constraint**: Supports both **ARM** (aarch64/arm64, armv7l) and **x86_64 / AMD64** architectures.
-- **OS Support**: Any Linux distribution. Tested on Raspberry Pi OS (64-bit), Ubuntu Server ARM64/AMD64, and Debian. Automatic installation of missing components is supported on `apt`-based systems.
+```
+MASTER (k3s-master.sh)              WORKER (k3s-worker.sh)
+──────────────────────────          ──────────────────────────────────────
+[1] Open firewall ports             [1] Open firewall ports
+[2] Install K3s server              [2] Install K3s agent
+[3] Build & import server image         └── with label edgekit.io/role=worker
+[4] helm install edgekit            [3] Build & import client image
+    ├── server pod  ──► Running     [4] Validate connection to master
+    └── client pod  ──► Pending (waiting)
+                         │
+                         │   ← Kubernetes scheduler detects
+                         │     the new labelled worker node
+                         │
+                         └──────────────────────────► Running [OK]
+```
+
+**Why `Pending` is intentional:**
+The Helm chart is deployed with `nodeSelector: {"edgekit.io/role": "worker"}` injected at install time. Since the Master node does not have that label, Kubernetes cannot schedule the client pod there — it waits. The moment the Worker joins the cluster with the correct label, the scheduler picks it up automatically. **No `helm upgrade`, no manual intervention.**
+
+---
+
+## Compatibility Matrix
+
+| | Master | Worker |
+|---|---|---|
+| **Architecture** | x86_64 / AMD64 only | ARM64, ARMv7, x86_64 |
+| **Tested OS** | Ubuntu Server 22.04, Debian 12 | Raspberry Pi OS 64-bit, Ubuntu Server ARM64/AMD64 |
+| **Auto-install** | `apt`-based systems | `apt`-based systems |
+| **Docker** | Required (auto-installed) | Required (auto-installed) |
+| **K3s** | Auto-installed (server mode) | Auto-installed (agent mode) |
+| **Helm** | Auto-installed (master only) | Not required |
 
 ---
 
 ## Quick Start
 
-### 1. Setup the Master Node (Server)
+### Step 1 — Run the Master
 
-On the Master machine (x86_64):
+On your x86 machine, from the repository root:
 
 ```bash
-chmod +x ./scripts/k3s-master.sh
-./scripts/k3s-master.sh
-
-# Debug mode (full output, no spinner):
-./scripts/k3s-master.sh --verbose
+bash scripts/k3s-master.sh
 ```
 
-#### What the Master script does:
-1. **Verifies Architecture**: Ensures the machine is x86_64 / AMD64.
-2. **Installs Prerequisites**: Checks and installs `curl`, `ca-certificates`, `docker.io`, `k3s` (in server mode with `--cluster-init`), `kubectl`, and `helm` (on `apt`-based systems).
-3. **Displays System/Technology Versions**: Prints OS, Kernel, CPU, RAM, Node.js, Python, Docker, K3s, and network details.
-4. **Builds & Imports Server Image**: Builds `edgekit-server:k3s-local` and imports it into the K3s containerd store.
-5. **Deploys Helm Chart**: Installs the local chart `helm/edgekit` with client replicas scaled to `0` (client pods will run on the Worker).
-6. **Runs Automated Tests**:
-   - Verifies the Master node status is `Ready`.
-   - Verifies the server pod is running.
-   - Verifies the server service is active.
-   - Verifies the image exists in containerd.
-7. **Generates Worker Connection Parameters**: Displays the exact command and credentials (`MASTER_IP` and `K3S_TOKEN`) needed for the Worker node to join.
+The script takes a few minutes and runs through these phases:
 
-At the end of execution, you will see a connection block like this:
-
-```text
-  ┌─────────────────────────────────────────────────────────────┐
-  │  MASTER_IP    = 192.168.1.50
-  │  K3S_TOKEN    = K1077e6...::server:a4c5b...
-  └─────────────────────────────────────────────────────────────┘
-
-  On the Worker machine, run:
-
-    bash scripts/k3s-worker.sh \
-      --master-ip "192.168.1.50" \
-      --token "K1077e6...::server:a4c5b..."
 ```
+[1/6] Configuring firewall (UFW + IP forwarding)
+[2/6] Installing prerequisites (Docker, K3s, kubectl, Helm)
+[3/6] Printing system info
+[4/6] Building & importing edgekit-server image
+[5/6] Deploying Helm chart (server Running, client Pending)
+[6/6] Running validation tests
+```
+
+At the end, the script prints the **connection block** you'll need for the Worker:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  WORKER NODE CONNECTION INFO                                 ║
+╠══════════════════════════════════════════════════════════════╣
+║  MASTER_IP  = 192.168.1.50                                   ║
+║  K3S_TOKEN  = K1077e6...::server:a4c5b...                    ║
+╠══════════════════════════════════════════════════════════════╣
+║  On the Worker machine, run:                                 ║
+║                                                              ║
+║    bash scripts/k3s-worker.sh \                              ║
+║      --master-ip "192.168.1.50" \                            ║
+║      --token "K1077e6...::server:a4c5b..."                   ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+> [!NOTE]
+> At this point, `kubectl -n edgekit get pods` will show the client pod as `Pending`. **This is correct and expected** — it's waiting for the Worker to join.
 
 ---
 
-### 2. Setup the Worker Node (Client)
+### Step 2 — Run the Worker
 
-Copy the repository to the Worker machine (via `git clone`, `rsync`, etc.).
-Run the worker script using the IP and Token provided by the Master node:
+Copy the repository to your Worker machine (Raspberry Pi, VM, etc.):
 
 ```bash
-chmod +x ./scripts/k3s-worker.sh
-./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>"
+# Option A: git clone
+git clone https://github.com/perspikapps/edgekit.git && cd edgekit
 
-# Debug mode (full output, no spinner):
-./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>" --verbose
+# Option B: rsync from your dev machine
+rsync -av /path/to/edgekit/ pi@<WORKER_IP>:~/edgekit/
 ```
 
-#### What the Worker script does:
-1. **Verifies Architecture**: Accepts ARM64, ARMv7, and x86_64.
-2. **Fixes Raspberry Pi cgroups**: If running on a Raspberry Pi and cgroups memory/cpuset limit options are missing in `/boot/cmdline.txt` or `/boot/firmware/cmdline.txt`, the script configures them and prompts for a system reboot.
-3. **Installs Prerequisites**: Installs `docker.io` and `k3s` (configured in agent/worker mode pointing to the Master).
-4. **Displays System/Technology Versions**: Prints OS, Hardware, Node.js, Docker, and K3s agent information.
-5. **Builds & Imports Client Image**: Builds `edgekit-client:k3s-local` and imports it into the K3s agent containerd store.
-6. **Runs Automated Connection & Functionality Tests**:
-   - Verifies network connectivity to the Master API server on port 6443.
-   - Verifies the K3s agent service/process is active.
-   - Verifies the node registers successfully in the K3s cluster.
-   - Verifies the client image is correctly imported.
-   - Verifies K3s containerd is reachable.
+Then run the worker script with the credentials from the Master's output:
+
+```bash
+bash scripts/k3s-worker.sh \
+  --master-ip "192.168.1.50" \
+  --token "K1077e6...::server:a4c5b..."
+```
+
+The Worker script:
+1. Configures the firewall (UFW / iptables)
+2. Fixes Raspberry Pi cgroups if needed (and reboots if required)
+3. Installs the K3s agent with `edgekit.io/role=worker` baked into the systemd service
+4. Builds and imports the `edgekit-client` image
+5. Runs 5 automated validation tests
+
+> [!TIP]
+> **Watch the magic happen in real time.** On the Master, run this before starting the Worker script:
+> ```bash
+> watch -n 2 kubectl -n edgekit get pods -o wide
+> ```
+> You'll see the client pod switch from `Pending` → `Running` the moment the Worker joins.
 
 ---
 
-## Verification
+### Step 3 — Verify
 
-Once both scripts have completed successfully, run the following verification steps on the **Master Node**:
-
-### Check Nodes status
-```bash
-kubectl get nodes -o wide
-```
-You should see both your Master node and Worker node listed as `Ready`.
-
-### Scale and verify Client Pods
-The Master Helm deployment has `client.replicaCount=0` by default. You can scale the client pods to run on the Worker nodes:
+On the **Master node**, confirm everything is healthy:
 
 ```bash
-helm upgrade edgekit ./helm/edgekit \
-  --namespace edgekit \
-  --set client.replicaCount=2
-```
+# All nodes should be Ready, Worker should have the label
+kubectl get nodes -o wide --show-labels
 
-Check where the pods are running:
-```bash
+# Pods should be distributed across nodes
 kubectl -n edgekit get pods -o wide
 ```
-The client pods should now be scheduled and running on the Worker node.
 
-### View Logs
-To view logs from the server component (running on the Master):
+Expected output:
+
+```
+NAME                        READY   STATUS    NODE
+edgekit-server-b4b44d57d    1/1     Running   master-node     ← x86 Master
+edgekit-client-7f9c8b6d4    1/1     Running   raspberry-pi    <- ARM Worker
+```
+
 ```bash
+# Stream live MQTT telemetry from the edge agents
+kubectl -n edgekit logs -f -l app.kubernetes.io/component=client
+
+# Monitor the MQTT broker
 kubectl -n edgekit logs -f -l app.kubernetes.io/component=server
 ```
 
-To view logs from the client agents (running on the Worker):
+---
+
+## Firewall Management
+
+Both scripts automatically configure the firewall on first run. No manual `ufw allow` commands needed.
+
+### What gets opened
+
+| Port | Protocol | Direction | Purpose |
+|---|---|---|---|
+| `6443` | TCP | Workers → Master | K3s API Server |
+| `8472` | UDP | Bidirectional | Flannel VXLAN overlay network |
+| `10250` | TCP | Master → Workers | Kubelet metrics & exec |
+
+Additionally, `net.ipv4.ip_forward=1` is written to `/etc/sysctl.d/99-k3s-edgekit.conf` and applied immediately.
+
+### Behavior by environment
+
+| Condition | Behavior |
+|---|---|
+| UFW installed + active | Ports are opened, `ufw reload` is triggered |
+| UFW installed + inactive | Logged, skipped — no change to UFW state |
+| UFW not installed | Logged, skipped |
+| iptables available | FORWARD ACCEPT rules added for pod CIDR `10.42.0.0/16` |
+
+### Skipping firewall (advanced users)
+
+If you manage your own firewall or use `nftables`, pass `--skip-firewall`:
+
 ```bash
-kubectl -n edgekit logs -f -l app.kubernetes.io/component=client
+# Master
+bash scripts/k3s-master.sh --skip-firewall
+
+# Worker
+bash scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN> --skip-firewall
 ```
+
+> [!WARNING]
+> If you skip the firewall configuration, you must manually ensure the ports above are open and that `net.ipv4.ip_forward=1` is set, otherwise Flannel networking between pods will fail silently.
 
 ---
 
-## Advanced Options
+## Advanced Options & Environment Variables
 
-Both scripts accept optional customization via environment variables.
+All environment variables are optional. They can be combined freely and passed inline before the script call.
 
-### Deploying multiple clients
-Run this on the Master node to deploy 3 clients by default:
+### Master script variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLIENT_REPLICAS` | `1` | Number of client (edge agent) pod replicas to schedule on Workers |
+| `PUBLISH_INTERVAL_MS` | `5000` | How often (ms) each edge agent publishes metrics to the MQTT broker |
+| `IMAGE_TAG` | `k3s-local` | Docker image tag used for build and import |
+| `NAMESPACE` | `edgekit` | Kubernetes namespace for the Helm release |
+| `RELEASE_NAME` | `edgekit` | Helm release name |
+| `VERBOSE` | `0` | Set to `1` to disable the spinner and print raw command output |
+| `SKIP_FIREWALL` | `0` | Set to `1` to skip UFW/iptables configuration |
+| `DOCKER_BIN` | `docker` | Override the Docker binary (e.g. `podman`) |
+| `LOG_DIR` | `<repo>/logs` | Directory where timestamped log files are written |
+
+### Worker script variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `IMAGE_TAG` | `k3s-local` | Must match the tag used on the Master |
+| `VERBOSE` | `0` | Set to `1` to disable the spinner |
+| `SKIP_FIREWALL` | `0` | Set to `1` to skip firewall configuration |
+| `DOCKER_BIN` | `docker` | Override the Docker binary |
+| `LOG_DIR` | `<repo>/logs` | Directory where log files are written |
+
+### Usage examples
+
 ```bash
-CLIENT_REPLICAS=3 ./scripts/k3s-master.sh
+# Deploy 3 client replicas instead of 1
+CLIENT_REPLICAS=3 bash scripts/k3s-master.sh
+
+# Publish metrics every 10 seconds
+PUBLISH_INTERVAL_MS=10000 bash scripts/k3s-master.sh
+
+# Use a custom image tag (must match on both nodes)
+IMAGE_TAG=dev-v2 bash scripts/k3s-master.sh
+IMAGE_TAG=dev-v2 bash scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN>
+
+# Full debug mode: see every command, every output line
+VERBOSE=1 bash scripts/k3s-master.sh
+# same as:
+bash scripts/k3s-master.sh --verbose
+
+# Combine multiple variables
+CLIENT_REPLICAS=2 IMAGE_TAG=sprint-4 VERBOSE=1 bash scripts/k3s-master.sh
 ```
-
-### Changing client publish interval
-```bash
-PUBLISH_INTERVAL_MS=10000 ./scripts/k3s-master.sh
-```
-
-### Using custom tags
-Ensure you pass the same `IMAGE_TAG` to both scripts if you want to override the default `k3s-local` tag:
-```bash
-# On Master
-IMAGE_TAG=custom-v1 ./scripts/k3s-master.sh
-
-# On Worker
-IMAGE_TAG=custom-v1 ./scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN>
-```
-
----
-
-## Handling Reboots, Rerunning, and IP Changes
-
-Both `k3s-master.sh` and `k3s-worker.sh` are designed to be **idempotent**, meaning they can be run multiple times safely without breaking existing configurations.
-
-### What happens on system reboot?
-- **K3s services auto-start**: The K3s server on the Master (`k3s` systemd service) and the K3s agent on the Worker (`k3s-agent` systemd service) are automatically enabled to start on system boot. You do **not** need to rerun the scripts to start K3s after restarting the machines.
-- **Docker auto-starts**: The Docker daemon also starts automatically on boot.
-
-### Rerunning the scripts
-You can rerun the scripts at any time to:
-- Rebuild and re-import the local Docker images if you made code changes.
-- Re-run the automated validation tests.
-- Re-apply Helm deployments (on Master).
-
-### Handling Master IP Changes (e.g., DHCP changes after reboot)
-In a local environment without static/reserved IP addresses, the Master node's IP address might change after a reboot. The scripts make it easy to update the configuration:
-
-1. **The Join Token is Permanent**: The K3s cluster token generated on the Master node is stored persistently in `/var/lib/rancher/k3s/server/node-token` and does **not** change when the Master's IP changes or when the machine reboots. You can always reuse the same token.
-2. **Retrieve the New IP**: Rerun the Master script or check the machine's IP address:
-   ```bash
-   ./scripts/k3s-master.sh
-   ```
-   This will display the new connection block with the updated IP.
-3. **Update the Worker Node**: Run the worker script with the **new Master IP** and the **same token**:
-   ```bash
-   bash scripts/k3s-worker.sh --master-ip "<NEW_MASTER_IP>" --token "<SAME_TOKEN>"
-   ```
-   The worker script will automatically update the K3s agent service configuration (`K3S_URL`), restart the agent, and reconnect the Worker node to the Master.
-
----
-
-## Log Files
-
-Logs are written under the `logs/` directory in the repository root:
-- Master log: `logs/k3s-master-YYYYMMDD-HHMMSS.log`
-- Worker log: `logs/k3s-worker-YYYYMMDD-HHMMSS.log`
-- Uninstall log: `logs/uninstall-edgekit-YYYYMMDD-HHMMSS.log`
 
 > [!TIP]
-> If the spinner freezes or you need to debug a failed step, rerun any script with the `--verbose` flag to see the full raw output directly in the terminal.
+> Use `--verbose` (or `VERBOSE=1`) whenever a spinner appears to freeze. It disables the progress indicator and prints the raw stdout/stderr of every command directly to the terminal, making it trivial to spot what's hanging.
 
 ---
 
-## Uninstallation
+## Reboots, Re-runs & IP Changes
 
-Use the dedicated `uninstall-edgekit.sh` script to perform a **complete cleanup** of any node (removes K3s, Helm releases, CNI interfaces, and EdgeKit Docker images):
+Both scripts are **fully idempotent** — safe to run multiple times on the same machine.
+
+### After a system reboot
+
+You do **not** need to rerun the scripts. All services are registered with systemd and start automatically:
+
+| Service | Node | Starts on boot? |
+|---|---|---|
+| `k3s` | Master | Yes |
+| `k3s-agent` | Worker | Yes |
+| `docker` | Both | Yes |
+
+The Worker's node label (`edgekit.io/role=worker`) is embedded in the `k3s-agent` systemd service unit via `INSTALL_K3S_EXEC` and is **re-applied on every agent start** — no kubectl access required on the Worker.
+
+### When to rerun the scripts
+
+| Situation | Action |
+|---|---|
+| You modified `server/` or `client/` source code | Rerun the respective script — it rebuilds and re-imports the image |
+| You want to change `CLIENT_REPLICAS` or other Helm values | Rerun `k3s-master.sh` with the new variable |
+| The Master's IP changed (DHCP) | See section below |
+| Validation tests failed | Rerun the script — it re-runs tests without reinstalling |
+
+### Master IP changed after reboot
+
+The **K3s node token never changes**. It lives at `/var/lib/rancher/k3s/server/node-token` and survives reboots and IP changes. Only the IP needs to be updated.
 
 ```bash
-# On the Master node
-bash scripts/uninstall-edgekit.sh --role master
+# 1. Get the new Master IP (run on Master)
+bash scripts/k3s-master.sh
+#    → the connection block at the end shows the current IP
 
-# On the Worker node
-bash scripts/uninstall-edgekit.sh --role worker
-
-# Auto-detect role (checks which k3s uninstall script is present)
-bash scripts/uninstall-edgekit.sh
+# 2. Update the Worker with the new IP and the SAME old token (run on Worker)
+bash scripts/k3s-worker.sh \
+  --master-ip "<NEW_IP>" \
+  --token "<SAME_TOKEN_AS_BEFORE>"
 ```
 
-After cleanup, the machine will be in a clean state and you can safely rerun `k3s-master.sh` or `k3s-worker.sh`.
+The Worker script updates `K3S_URL` in the systemd service and restarts the agent automatically.
+
+---
+
+## Logs & Debugging
+
+Every script run produces a **timestamped log file** with the full output of every command (even in spinner mode):
+
+```
+logs/
+├── k3s-master-20260609-143012.log
+├── k3s-worker-20260609-145523.log
+└── uninstall-edgekit-20260609-162201.log
+```
+
+### Debugging workflow
+
+```bash
+# Step 1: Re-run in verbose mode to see what's happening live
+bash scripts/k3s-master.sh --verbose
+
+# Step 2: Inspect the latest log file
+tail -100 logs/k3s-master-*.log | less
+
+# Step 3: Check K3s service status on Master
+sudo systemctl status k3s
+sudo journalctl -u k3s -n 100 --no-pager
+
+# Step 4: Check K3s agent status on Worker
+sudo systemctl status k3s-agent
+sudo journalctl -u k3s-agent -n 100 --no-pager
+
+# Step 5: Check pod events (scheduling errors, image pull errors)
+kubectl -n edgekit describe pod <pod-name>
+```
+
+---
+
+## Uninstallation (Clean Slate)
+
+Use the dedicated script to fully reset a node — removes K3s, Helm releases, CNI interfaces, firewall rules, and EdgeKit Docker images.
+
+```bash
+# Auto-detect role from installed binaries
+bash scripts/uninstall-edgekit.sh
+
+# Or specify explicitly
+bash scripts/uninstall-edgekit.sh --role master
+bash scripts/uninstall-edgekit.sh --role worker
+
+# Full verbose output
+bash scripts/uninstall-edgekit.sh --role master --verbose
+```
+
+After cleanup, the machine is in a clean state. You can safely rerun `k3s-master.sh` or `k3s-worker.sh` for a fresh deployment — no reflashing required.
+
+> [!CAUTION]
+> Running `uninstall-edgekit.sh` on the Master will **also evict all worker nodes** from the cluster (since the API server is gone). Always uninstall workers **before** the master if you want a graceful teardown.
+
+---
+
+## Reference: Script Flags
+
+### `k3s-master.sh`
+
+```
+Usage: bash scripts/k3s-master.sh [OPTIONS]
+
+Flags:
+  -v, --verbose         Disable spinner, print raw command output to terminal
+  -F, --skip-firewall   Skip UFW/iptables configuration
+  -h, --help            Show this help message
+```
+
+### `k3s-worker.sh`
+
+```
+Usage: bash scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN> [OPTIONS]
+
+Required:
+  --master-ip <IP>      IP address of the K3s Master node
+  --token <TOKEN>       Join token (printed by k3s-master.sh)
+
+Flags:
+  -v, --verbose         Disable spinner, print raw command output to terminal
+  -F, --skip-firewall   Skip UFW/iptables configuration
+  -h, --help            Show this help message
+```
+
+### `uninstall-edgekit.sh`
+
+```
+Usage: bash scripts/uninstall-edgekit.sh [--role master|worker] [--verbose]
+
+  --role master|worker  Specify which node type to clean up
+                        (auto-detected if omitted)
+  --verbose             Print all uninstall command output
+```

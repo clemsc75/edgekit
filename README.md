@@ -114,6 +114,7 @@ helm install edgekit ./helm/edgekit \
 ### Local k3s test deploy (Multi-Node Master/Worker)
 
 Run the local K3s test using two separate scripts to simulate a Master (Server) and a Worker (Client) node.
+The deployment is **Zero-Touch**: the client pod starts `Pending` on the Master and automatically transitions to `Running` on the Worker as soon as it joins the cluster.
 
 **1. On the Master Node (x86_64 only):**
 ```bash
@@ -122,8 +123,12 @@ chmod +x ./scripts/k3s-master.sh
 
 # Debug mode (full output, no spinner):
 ./scripts/k3s-master.sh --verbose
+
+# If you manage your own firewall:
+./scripts/k3s-master.sh --skip-firewall
 ```
-This script will print out the IP and Token parameters to run on the Worker node:
+This script will print out the IP and Token parameters to run on the Worker node.
+The client pod will appear as `Pending` — this is expected until the Worker joins.
 
 **2. On the Worker Node (ARM or x86_64):**
 ```bash
@@ -132,7 +137,11 @@ chmod +x ./scripts/k3s-worker.sh
 
 # Debug mode (full output, no spinner):
 ./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>" --verbose
+
+# If you manage your own firewall:
+./scripts/k3s-worker.sh --master-ip "<MASTER_IP>" --token "<K3S_TOKEN>" --skip-firewall
 ```
+The Worker joins with the label `edgekit.io/role=worker`. Kubernetes automatically schedules the client pod on it — no manual action required.
 
 Optional variables on Master:
 ```bash
