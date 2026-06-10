@@ -165,16 +165,92 @@ fi
 uninstall_master() {
   print_section "MASTER CLEANUP – Helm & K3s Server"
 
-  # 1) Helm uninstall (best-effort: K3s may not be running yet)
+  # -----------------------------------------------------------------------
+  # Helm / kubectl cleanup — BEST-EFFORT with strict timeouts
+  #
+  # Two layers of timeout protection are used deliberately:
+  #
+  #   Layer 1 – Native flags:
+  #     helm uninstall --timeout 30s   → Helm stops waiting for Pod
+  #                                      termination after 30 s.
+  #     kubectl delete ns --timeout=20s → kubectl gives up waiting for
+  #                                      the namespace Finalizer after 20 s.
+  #
+  #   Layer 2 – System timeout(1) wrapper on the entire function:
+  #     Some helm/kubectl versions ignore their own --timeout flag when
+  #     the API server is completely unreachable (TCP connection hangs
+  #     at the OS level). The outer `timeout 90` is the absolute wall-
+  #     clock limit; if it fires, the sub-process is SIGTERM'd and the
+  #     || true prevents set -e from aborting the script.
+  #
+  # If the cluster is healthy the whole block completes in < 10 s.
+  # If the cluster is degraded the block is abandoned in ≤ 90 s and
+  # the script moves on to the brute-force k3s-uninstall.sh step.
+  # -----------------------------------------------------------------------
   echo "==> Removing Helm release '${RELEASE_NAME}' from namespace '${NAMESPACE}'..."
-  if command_exists helm && command_exists kubectl; then
-    _do_helm_uninstall() {
-      helm uninstall "${RELEASE_NAME}" --namespace "${NAMESPACE}" 2>/dev/null || true
-      kubectl delete namespace "${NAMESPACE}" --ignore-not-found 2>/dev/null || true
-    }
-    run_with_spinner "Removing Helm release '${RELEASE_NAME}'" _do_helm_uninstall
+
+  if ! command_exists helm || ! command_exists kubectl; then
+    echo "    helm or kubectl not found – skipping Helm uninstall."
   else
-    echo "    helm/kubectl not found – skipping Helm uninstall."
+    _do_helm_uninstall() {
+      # --- Step 1: Helm uninstall (30 s hard cap) ---
+      # --no-hooks skips pre/post-delete hooks that may themselves block.
+      # 2>/dev/null silences "release not found" when already removed.
+      echo "    [1/3] helm uninstall (timeout 30s)..."
+      timeout 35 helm uninstall "${RELEASE_NAME}" \
+        --namespace "${NAMESPACE}" \
+        --timeout 30s \
+        --no-hooks \
+        --ignore-not-found \
+        2>/dev/null || true
+
+      # --- Step 2: Delete namespace (20 s hard cap) ---
+      echo "    [2/3] kubectl delete namespace (timeout 20s)..."
+      timeout 25 kubectl delete namespace "${NAMESPACE}" \
+        --ignore-not-found \
+        --timeout=20s \
+        2>/dev/null || true
+
+      # --- Step 3: Force-clear Finalizer if namespace is stuck Terminating ---
+      # When the API server is degraded the garbage-collector never removes
+      # the kubernetes Finalizer, leaving the namespace in Terminating forever.
+      # We patch it out directly via the REST API, bypassing the controller.
+      local ns_phase
+      ns_phase=$(kubectl get namespace "${NAMESPACE}" \
+        -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+
+      if [ "${ns_phase}" = "Terminating" ]; then
+        echo "    [3/3] Namespace stuck in Terminating – patching out Finalizer..."
+        # Build a minimal JSON body and pipe it to kubectl replace via the
+        # /finalize sub-resource. This is the officially documented escape hatch.
+        kubectl get namespace "${NAMESPACE}" -o json 2>/dev/null \
+          | python3 -c "
+import sys, json
+ns = json.load(sys.stdin)
+ns['spec']['finalizers'] = []
+print(json.dumps(ns))
+" \
+          | timeout 10 kubectl replace --raw \
+              "/api/v1/namespaces/${NAMESPACE}/finalize" \
+              -f - \
+              2>/dev/null || true
+        echo "    Finalizer patch applied (or skipped if already gone)."
+      else
+        echo "    [3/3] Namespace not stuck – no Finalizer patch needed."
+      fi
+    }
+
+    # Outer wall-clock guard: if _do_helm_uninstall takes more than 90 s
+    # in total (e.g. TCP-level hang), abandon it and move on.
+    if command_exists timeout; then
+      echo "    Running Helm cleanup (wall-clock limit: 90s)..."
+      timeout 90 bash -c "$(declare -f _do_helm_uninstall); _do_helm_uninstall" \
+        || echo "    WARN: Helm cleanup timed out or failed – continuing with K3s uninstall."
+    else
+      # timeout(1) not available (very minimal images) — run without outer guard
+      echo "    WARN: 'timeout' command not found; running without outer time limit."
+      _do_helm_uninstall || true
+    fi
   fi
 
   # 2) Official K3s server uninstall script

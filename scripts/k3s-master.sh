@@ -509,6 +509,7 @@ deploy_edgekit_server() {
       | grep -oE 'v3\.[0-9]+' | grep -oE '[0-9]+$' || echo "0")
 
     local _node_selector_flag
+    local _node_selector_val
     if [ "${_helm_minor}" -ge 10 ] 2>/dev/null; then
       # --set-json is cleaner and handles special chars natively (Helm ≥ 3.10)
       _node_selector_flag="--set-json"
@@ -525,9 +526,17 @@ deploy_edgekit_server() {
       --set server.image.repository=edgekit-server \
       --set server.image.tag="${IMAGE_TAG}" \
       --set server.image.pullPolicy=IfNotPresent \
-      --set client.replicaCount=1 \
-      "${_node_selector_flag}" "${_node_selector_val}" \
-      --wait
+      --set client.image.repository=edgekit-client \
+      --set client.image.tag="${IMAGE_TAG}" \
+      --set client.image.pullPolicy=IfNotPresent \
+      --set client.replicaCount="${CLIENT_REPLICAS}" \
+      --set client.publishIntervalMs="${PUBLISH_INTERVAL_MS}" \
+      "${_node_selector_flag}" "${_node_selector_val}"
+    # NOTE: --wait is intentionally omitted.
+    # The client pod has nodeSelector: {edgekit.io/role: worker} and will stay
+    # Pending on the Master (no matching label). --wait would block until Helm
+    # times out waiting for the client Deployment to become Ready, crashing the
+    # script. The server pod is verified separately by run_server_tests().
   }
 
   run_with_spinner "Building Docker server image" _do_docker_build_server
@@ -549,25 +558,37 @@ run_server_tests() {
   local failed=0
 
   # Test 1 – Server pod is running
+  # Because --wait was removed from the Helm deploy (the client pod is
+  # intentionally Pending and would cause --wait to time out), we poll
+  # here for up to 60 s until the server pod reaches Running state.
   echo "[TEST 1/4] Server pod is running..."
-  local server_pod
-  server_pod=$("${KUBECTL_CMD[@]}" -n "${NAMESPACE}" get pods \
-    -l "app.kubernetes.io/component=server" \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+  local server_pod=""
+  local pod_status=""
+  local _wait_secs=0
+  while [ "${_wait_secs}" -lt 60 ]; do
+    server_pod=$("${KUBECTL_CMD[@]}" -n "${NAMESPACE}" get pods \
+      -l "app.kubernetes.io/component=server" \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+    if [ -n "${server_pod}" ]; then
+      pod_status=$("${KUBECTL_CMD[@]}" -n "${NAMESPACE}" get pod "${server_pod}" \
+        -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
+      if [ "${pod_status}" = "Running" ]; then
+        break
+      fi
+    fi
+    echo "    Waiting for server pod... (${_wait_secs}s elapsed)"
+    sleep 5
+    _wait_secs=$((_wait_secs + 5))
+  done
 
   if [ -z "${server_pod}" ]; then
-    echo "  FAIL – No server pod found in namespace '${NAMESPACE}'"
+    echo "  FAIL – No server pod found in namespace '${NAMESPACE}' after 60s"
+    failed=$((failed + 1))
+  elif [ "${pod_status}" != "Running" ]; then
+    echo "  FAIL – Pod '${server_pod}' status is '${pod_status}' after 60s (expected Running)"
     failed=$((failed + 1))
   else
-    local pod_status
-    pod_status=$("${KUBECTL_CMD[@]}" -n "${NAMESPACE}" get pod "${server_pod}" \
-      -o jsonpath='{.status.phase}' 2>/dev/null || echo "Unknown")
-    if [ "${pod_status}" = "Running" ]; then
-      echo "  PASS – Pod '${server_pod}' is Running"
-    else
-      echo "  FAIL – Pod '${server_pod}' status is '${pod_status}' (expected Running)"
-      failed=$((failed + 1))
-    fi
+    echo "  PASS – Pod '${server_pod}' is Running"
   fi
 
   # Test 2 – Server service exists

@@ -8,8 +8,8 @@
 
 ```
                     YOUR LOCAL NETWORK (LAN / Ethernet)
-   ┌──────────────────────────────────────────────────────┐
-   │                                                      │
+   ┌─────────────────────────────────────────────────────┐
+   │                                                     │
    │  ┌────────────────────────┐   ┌──────────────────┐  │
    │  │   MASTER NODE (x86)    │   │  WORKER NODE     │  │
    │  │                        │   │  (ARM or x86)    │  │
@@ -24,10 +24,10 @@
    │  │  │ port 1883 / 9001 │  │   │  │client      │  │  │
    │  │  └──────────────────┘  │   │  │(edge agent)│  │  │
    │  │                        │   │  └────────────┘  │  │
-   │  │  k3s-master.sh             │   │  k3s-worker.sh   │  │
+   │  │  k3s-master.sh         │   │  k3s-worker.sh   │  │
    │  └────────────────────────┘   └──────────────────┘  │
-   │                                                      │
-   └──────────────────────────────────────────────────────┘
+   │                                                     │
+   └─────────────────────────────────────────────────────┘
 ```
 
 | Node | Role | Architecture | Script |
@@ -102,18 +102,16 @@ The script takes a few minutes and runs through these phases:
 At the end, the script prints the **connection block** you'll need for the Worker:
 
 ```
-╔══════════════════════════════════════════════════════════════╗
-║  WORKER NODE CONNECTION INFO                                 ║
-╠══════════════════════════════════════════════════════════════╣
-║  MASTER_IP  = 192.168.1.50                                   ║
-║  K3S_TOKEN  = K1077e6...::server:a4c5b...                    ║
-╠══════════════════════════════════════════════════════════════╣
-║  On the Worker machine, run:                                 ║
-║                                                              ║
-║    bash scripts/k3s-worker.sh \                              ║
-║      --master-ip "192.168.1.50" \                            ║
-║      --token "K1077e6...::server:a4c5b..."                   ║
-╚══════════════════════════════════════════════════════════════╝
+  ┌─────────────────────────────────────────────────────────────┐
+  │  MASTER_IP    = 192.168.1.50
+  │  K3S_TOKEN    = K1077e6...::server:a4c5b...
+  └─────────────────────────────────────────────────────────────┘
+
+  On the Worker machine, run:
+
+    bash scripts/k3s-worker.sh \
+      --master-ip "192.168.1.50" \
+      --token "K1077e6...::server:a4c5b..."
 ```
 
 > [!NOTE]
@@ -249,11 +247,14 @@ All environment variables are optional. They can be combined freely and passed i
 
 | Variable | Default | Description |
 |---|---|---|
-| `IMAGE_TAG` | `k3s-local` | Must match the tag used on the Master |
+| `IMAGE_TAG` | `k3s-local` | Docker image tag for the client build — must match the tag used on the Master |
 | `VERBOSE` | `0` | Set to `1` to disable the spinner |
 | `SKIP_FIREWALL` | `0` | Set to `1` to skip firewall configuration |
 | `DOCKER_BIN` | `docker` | Override the Docker binary |
 | `LOG_DIR` | `<repo>/logs` | Directory where log files are written |
+
+> [!NOTE]
+> `CLIENT_REPLICAS` and `PUBLISH_INTERVAL_MS` are **Master-only** Helm values. Setting them on the Worker has no effect. Pass them to `k3s-master.sh` instead.
 
 ### Usage examples
 
@@ -264,7 +265,11 @@ CLIENT_REPLICAS=3 bash scripts/k3s-master.sh
 # Publish metrics every 10 seconds
 PUBLISH_INTERVAL_MS=10000 bash scripts/k3s-master.sh
 
-# Use a custom image tag (must match on both nodes)
+# Use a custom image tag
+# IMAGE_TAG controls the Docker image tag on each machine independently:
+#   Master → builds and imports edgekit-server:<TAG>
+#   Worker → builds and imports edgekit-client:<TAG>
+# Use the same value on both so the Helm chart references the correct image.
 IMAGE_TAG=dev-v2 bash scripts/k3s-master.sh
 IMAGE_TAG=dev-v2 bash scripts/k3s-worker.sh --master-ip <IP> --token <TOKEN>
 
