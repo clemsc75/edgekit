@@ -244,6 +244,7 @@ ensure_firewall_rules() {
     # (permission denied, ufw daemon not running, etc.) is silently swallowed
     # and never triggers 'set -e'. Only then do we grep the captured output.
     local _ufw_raw
+    _ufw_raw=$(as_root ufw status 2>/dev/null || true)
 
     if ! echo "${_ufw_raw}" | grep -q "Status: active"; then
       echo "==> UFW is installed but not active – skipping UFW rules"
