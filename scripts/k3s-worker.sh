@@ -504,7 +504,7 @@ deploy_edgekit_client() {
     _tmptar=$(mktemp /tmp/edgekit-client.XXXXXX)
     "${DOCKER_CMD[@]}" save --output "${_tmptar}" "${CLIENT_IMAGE}"
     as_root k3s ctr -n k8s.io images import "${_tmptar}"
-    rm -f "${_tmptar}"
+    as_root rm -f "${_tmptar}"
   }
 
   run_with_spinner "Building Docker client image" _do_docker_build_client

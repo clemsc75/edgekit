@@ -505,7 +505,7 @@ deploy_edgekit_server() {
     _tmptar=$(mktemp /tmp/edgekit-server.XXXXXX)
     "${DOCKER_CMD[@]}" save --output "${_tmptar}" "${SERVER_IMAGE}"
     as_root k3s ctr -n k8s.io images import "${_tmptar}"
-    rm -f "${_tmptar}"
+    as_root rm -f "${_tmptar}"
   }
 
   _do_helm_deploy_server() {
