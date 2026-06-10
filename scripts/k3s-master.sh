@@ -502,7 +502,7 @@ deploy_edgekit_server() {
     # before the spinner's '|| exit_code=$?' can capture the code, making the
     # failure silent and leaving the spinner running forever.
     local _tmptar
-    _tmptar=$(mktemp /tmp/edgekit-server-XXXXXX.tar)
+    _tmptar=$(mktemp /tmp/edgekit-server.XXXXXX)
     "${DOCKER_CMD[@]}" save --output "${_tmptar}" "${SERVER_IMAGE}"
     as_root k3s ctr -n k8s.io images import "${_tmptar}"
     rm -f "${_tmptar}"
