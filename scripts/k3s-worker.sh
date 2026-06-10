@@ -487,7 +487,24 @@ deploy_edgekit_client() {
   }
 
   _do_import_client_image() {
-    "${DOCKER_CMD[@]}" save "${CLIENT_IMAGE}" | as_root k3s ctr images import -
+    # Import explicitly into the k8s.io containerd namespace so that
+    # Test 4 can verify the image immediately after import.
+    # Without -n k8s.io the image lands in 'default', which is invisible
+    # to 'k3s ctr -n k8s.io images list' used by the verification step.
+    #
+    # IMPORTANT: we deliberately split the pipe into two steps (save to a temp
+    # file, then import) instead of using a single pipe
+    #   docker save | k3s ctr import -
+    # Reason: 'as_root' is a shell function. Piping into a shell function causes
+    # bash to run it in a subshell where 'set -e' is active. If k3s ctr import
+    # exits non-zero (e.g. disk full, bad format), 'set -e' kills the subshell
+    # before the spinner's '|| exit_code=$?' can capture the code, making the
+    # failure silent and leaving the spinner running forever.
+    local _tmptar
+    _tmptar=$(mktemp /tmp/edgekit-client-XXXXXX.tar)
+    "${DOCKER_CMD[@]}" save --output "${_tmptar}" "${CLIENT_IMAGE}"
+    as_root k3s ctr -n k8s.io images import "${_tmptar}"
+    rm -f "${_tmptar}"
   }
 
   run_with_spinner "Building Docker client image" _do_docker_build_client
@@ -562,21 +579,23 @@ run_worker_tests() {
   fi
 
   # Test 4 – Client image is in containerd
-  # NOTE: k3s ctr images import places the image in containerd's DEFAULT namespace.
-  # K3s only copies it to the k8s.io namespace when it actually pulls the image
-  # to schedule a pod. At this point the client pod is Pending on the Master
-  # (waiting for a labelled Worker node), so it has never been pulled here.
-  # This test is therefore a WARN, not a FAIL: a FAIL would cause exit 1 and
-  # prevent print_summary() from running, misleading the operator.
-  echo "[TEST 4/5] Client image is present in k3s containerd (k8s.io namespace)..."
+  # The image is now imported into k8s.io directly (see _do_import_client_image).
+  # On a fresh deployment the image will be present in k8s.io immediately after import.
+  #
+  # We still display a WARN (not FAIL) if the image is not found in k8s.io, because:
+  #   - the client pod is Pending on the master (no Worker yet) so it has never been
+  #     pulled to run a container — which is the Zero-Touch expected state.
+  #   - A missing image here does NOT block the cluster from working once the Worker joins.
+  # A FAIL here would exit 1 and skip print_summary(), misleading the operator.
+  echo "[TEST 4/5] Client image is present in containerd (k8s.io namespace)..."
   local img_list_worker
   img_list_worker=$(as_root k3s ctr -n k8s.io images list 2>/dev/null) || true
   if echo "${img_list_worker}" | grep -q "edgekit-client"; then
-    echo "  PASS – Client image found in containerd store (k8s.io namespace)"
+    echo "  PASS – Client image found in containerd (k8s.io namespace)"
   else
-    echo "  WARN – Client image not yet in k8s.io namespace (expected: pod is still Pending on master)"
-    echo "         It will appear here once the Master schedules the client pod onto this node."
-    echo "         Verify with: sudo k3s ctr -n k8s.io images list | grep edgekit-client"
+    echo "  WARN – Client image not yet visible in k8s.io namespace."
+    echo "         This is expected if the pod is still Pending on the Master (Zero-Touch state)."
+    echo "         Verify after the Master schedules the pod: sudo k3s ctr -n k8s.io images list | grep edgekit-client"
     # Not counted as a failure: this is the correct Zero-Touch state.
   fi
 
