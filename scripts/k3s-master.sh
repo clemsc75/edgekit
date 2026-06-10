@@ -565,7 +565,9 @@ run_server_tests() {
   local server_pod=""
   local pod_status=""
   local _wait_secs=0
-  while [ "${_wait_secs}" -lt 60 ]; do
+  local _max_wait_secs=180
+
+  while [ "${_wait_secs}" -lt "${_max_wait_secs}" ]; do
     server_pod=$("${KUBECTL_CMD[@]}" -n "${NAMESPACE}" get pods \
       -l "app.kubernetes.io/component=server" \
       -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
