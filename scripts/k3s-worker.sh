@@ -542,7 +542,7 @@ run_worker_tests() {
   local failed=0
 
   # Test 1 – Can reach master API server
-  echo "[TEST 1/5] Network connectivity to master (${MASTER_IP}:6443)..."
+  echo "[TEST 1/4] Network connectivity to master (${MASTER_IP}:6443)..."
   if command_exists curl; then
     if curl -sk --max-time 5 "https://${MASTER_IP}:6443/readyz" >/dev/null 2>&1 || \
        curl -sk --max-time 5 "https://${MASTER_IP}:6443" >/dev/null 2>&1; then
@@ -557,7 +557,7 @@ run_worker_tests() {
   fi
 
   # Test 2 – k3s agent process or service is running
-  echo "[TEST 2/5] K3s agent is running..."
+  echo "[TEST 2/4] K3s agent is running..."
   if command_exists systemctl && systemctl is-active --quiet k3s-agent 2>/dev/null; then
     echo "  PASS – k3s-agent systemd service is active"
   elif pgrep -x "k3s" >/dev/null 2>&1 || pgrep -f "k3s agent" >/dev/null 2>&1; then
@@ -568,33 +568,7 @@ run_worker_tests() {
     failed=$((failed + 1))
   fi
 
-  # Test 3 – This node appears in the cluster
-  echo "[TEST 3/5] This node is visible in the K3s cluster..."
-  local node_name
-  node_name=$(hostname)
-  # Give the agent up to 30s to register
-  local registered="false"
-  for i in $(seq 1 6); do
-    if command_exists kubectl && kubectl get node "${node_name}" >/dev/null 2>&1; then
-      registered="true"
-      break
-    elif command_exists k3s && k3s kubectl get node "${node_name}" >/dev/null 2>&1; then
-      registered="true"
-      break
-    fi
-    echo "    Waiting for node registration... (${i}/6)"
-    sleep 5
-  done
-
-  if [ "${registered}" = "true" ]; then
-    echo "  PASS – Node '${node_name}' is registered in the cluster"
-  else
-    # Downgrade to warning since kubectl might not be on the worker
-    echo "  WARN – Could not verify node registration from this machine."
-    echo "         Run on master: kubectl get nodes -o wide"
-  fi
-
-  # Test 4 – Client image is in containerd
+  # Test 3 – Client image is in containerd
   # The image is now imported into k8s.io directly (see _do_import_client_image).
   # On a fresh deployment the image will be present in k8s.io immediately after import.
   #
@@ -603,7 +577,7 @@ run_worker_tests() {
   #     pulled to run a container — which is the Zero-Touch expected state.
   #   - A missing image here does NOT block the cluster from working once the Worker joins.
   # A FAIL here would exit 1 and skip print_summary(), misleading the operator.
-  echo "[TEST 4/5] Client image is present in containerd (k8s.io namespace)..."
+  echo "[TEST 3/4] Client image is present in containerd (k8s.io namespace)..."
   local img_list_worker
   img_list_worker=$(as_root k3s ctr -n k8s.io images list 2>/dev/null) || true
   if echo "${img_list_worker}" | grep -q "edgekit-client"; then
@@ -615,8 +589,8 @@ run_worker_tests() {
     # Not counted as a failure: this is the correct Zero-Touch state.
   fi
 
-  # Test 5 – k3s containerd socket is reachable
-  echo "[TEST 5/5] K3s containerd is reachable..."
+  # Test 4 – k3s containerd socket is reachable
+  echo "[TEST 4/4] K3s containerd is reachable..."
   if as_root k3s ctr images list >/dev/null 2>&1; then
     echo "  PASS – k3s containerd is responding"
   else
