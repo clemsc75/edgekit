@@ -287,7 +287,7 @@ ensure_k3s_server() {
 
     # _do_install_k3s_server is a helper so run_with_spinner can wrap the pipe
     _do_install_k3s_server() {
-      curl -sfL https://get.k3s.io | sh -s - server \
+      curl -sSfL https://get.k3s.io | sh -s - server \
         --write-kubeconfig-mode=644 \
         --cluster-init
     }
@@ -697,12 +697,21 @@ print_worker_join_info() {
   local token
   token=$(as_root cat /var/lib/rancher/k3s/server/node-token 2>/dev/null || echo "UNAVAILABLE")
 
-  # Prefer the first non-loopback IPv4 address
-  local master_ip="UNAVAILABLE"
+  local master_ip=""
   if command_exists ip; then
-    master_ip=$(ip -4 addr show scope global | awk '/inet / { split($2, a, "/"); print a[1]; exit }')
+    # 1. Prefer the primary IP used for internet routing (bypasses docker0, flannel, virtual interfaces)
+    master_ip=$(ip route get 1.1.1.1 2>/dev/null | awk -F"src " 'NR==1{split($2,a," ");print a[1]}')
+    
+    # 2. Fallback to the first global IP that is NOT docker0
+    if [ -z "${master_ip}" ]; then
+      master_ip=$(ip -4 addr show scope global | grep -v ' docker0' | awk '/inet / { split($2, a, "/"); print a[1]; exit }')
+    fi
   elif command_exists hostname; then
     master_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+
+  if [ -z "${master_ip}" ]; then
+    master_ip="<MASTER_IP>"
   fi
 
   echo ""
@@ -752,6 +761,20 @@ if [ "${SKIP_FIREWALL}" = "1" ]; then
 echo "  Firewall: SKIPPED (--skip-firewall)"
 fi
 echo "============================================================"
+
+if [ "${VERBOSE}" = "1" ]; then
+  echo ""
+  echo "--- [DEBUG] Environment Dump ---"
+  echo "NAMESPACE           = ${NAMESPACE}"
+  echo "RELEASE_NAME        = ${RELEASE_NAME}"
+  echo "IMAGE_TAG           = ${IMAGE_TAG}"
+  echo "CLIENT_REPLICAS     = ${CLIENT_REPLICAS}"
+  echo "PUBLISH_INTERVAL_MS = ${PUBLISH_INTERVAL_MS}"
+  echo "DOCKER_BIN          = ${DOCKER_BIN}"
+  echo "LOG_FILE            = ${LOG_FILE}"
+  echo "--------------------------------"
+  echo ""
+fi
 
 verify_architecture
 ensure_firewall_rules

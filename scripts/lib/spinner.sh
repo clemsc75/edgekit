@@ -150,8 +150,11 @@ run_with_spinner() {
   if [ "${VERBOSE:-0}" = "1" ]; then
     echo ""
     echo "==> ${label}"
+    set -x
     "$@"
-    return $?
+    local exit_code=$?
+    set +x
+    return $exit_code
   fi
 
   # ------------------------------------------------------------------
@@ -175,7 +178,7 @@ run_with_spinner() {
   # The exec-level tee redirect in the parent script captures script-level
   # echo/print_section messages; here we bypass it intentionally so the
   # raw command output stays out of the terminal.
-  "$@" >> "${LOG_FILE}" 2>&1 || exit_code=$?
+  ( set -x; "$@" ) >> "${LOG_FILE}" 2>&1 || exit_code=$?
 
   local end_time
   end_time=$(date +%s)

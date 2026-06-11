@@ -352,6 +352,21 @@ ensure_docker() {
   fi
 }
 
+ensure_system_time() {
+  # Fetch date header from get.k3s.io (plain HTTP to bypass SSL issues)
+  local server_date
+  server_date=$(curl -sI http://get.k3s.io | grep -i '^date:' | sed 's/^[Dd]ate: //g' | tr -d '\r')
+  
+  if [ -n "${server_date}" ]; then
+    if command_exists sudo; then
+      sudo date -s "${server_date}" >/dev/null 2>&1 || true
+    else
+      date -s "${server_date}" >/dev/null 2>&1 || true
+    fi
+    echo "==> System date synchronized (to prevent SSL Code 60 errors)"
+  fi
+}
+
 ensure_k3s_agent() {
   ensure_download_tools
 
@@ -370,7 +385,7 @@ ensure_k3s_agent() {
   # This means the label is re-applied every time the k3s-agent service starts,
   # making it fully idempotent without requiring kubectl access on the Worker node.
   _do_install_k3s_agent() {
-    curl -sfL https://get.k3s.io | \
+    curl -sSfL https://get.k3s.io | \
       K3S_URL="https://${MASTER_IP}:6443" \
       K3S_TOKEN="${K3S_TOKEN}" \
       INSTALL_K3S_EXEC="agent --node-label edgekit.io/role=worker" \
@@ -666,11 +681,26 @@ echo "  Firewall: SKIPPED (--skip-firewall)"
 fi
 echo "============================================================"
 
+if [ "${VERBOSE}" = "1" ]; then
+  echo ""
+  echo "--- [DEBUG] Environment Dump ---"
+  echo "MASTER_IP           = ${MASTER_IP}"
+  echo "K3S_TOKEN           = [REDACTED]"
+  echo "NAMESPACE           = ${NAMESPACE}"
+  echo "RELEASE_NAME        = ${RELEASE_NAME}"
+  echo "IMAGE_TAG           = ${IMAGE_TAG}"
+  echo "DOCKER_BIN          = ${DOCKER_BIN}"
+  echo "LOG_FILE            = ${LOG_FILE}"
+  echo "--------------------------------"
+  echo ""
+fi
+
 verify_architecture
 ensure_pi_cgroups
 ensure_firewall_rules
 ensure_base_packages
 ensure_docker
+ensure_system_time
 ensure_k3s_agent
 print_versions
 deploy_edgekit_client
