@@ -107,6 +107,16 @@ DOCKER_BIN="${DOCKER_BIN:-docker}"
 CLIENT_IMAGE="edgekit-client:${IMAGE_TAG}"
 LOG_FILE="${LOG_DIR}/k3s-worker-$(date +%Y%m%d-%H%M%S).log"
 
+# =============================================================================
+# Sudo & Root Privileges Check
+# =============================================================================
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+  echo "ERROR: Ce script doit être exécuté en root, ou votre utilisateur" >&2
+  echo "       doit pouvoir utiliser 'sudo' sans mot de passe (NOPASSWD)." >&2
+  echo "       Sinon, l'exécution bloquera silencieusement en arrière-plan." >&2
+  exit 1
+fi
+
 mkdir -p "${LOG_DIR}"
 # All script-level echo / print_section output goes to terminal + log via tee.
 # run_with_spinner bypasses this by writing command output directly to LOG_FILE.
@@ -364,6 +374,11 @@ ensure_system_time() {
       date -s "${server_date}" >/dev/null 2>&1 || true
     fi
     echo "==> System date synchronized (to prevent SSL Code 60 errors)"
+  else
+    echo "WARN: Attention, l'horloge n'a pas pu être synchronisée via get.k3s.io." >&2
+    echo "      Si l'installation échoue avec une erreur 'SSL certificate problem (code 60)'," >&2
+    echo "      veuillez régler l'heure manuellement :" >&2
+    echo "      sudo date -s \"YYYY-MM-DD HH:MM:SS\" (ex: sudo date -s \"$(date +'%Y-%m-%d %H:%M:%S')\")" >&2
   fi
 }
 
@@ -385,7 +400,7 @@ ensure_k3s_agent() {
   # This means the label is re-applied every time the k3s-agent service starts,
   # making it fully idempotent without requiring kubectl access on the Worker node.
   _do_install_k3s_agent() {
-    curl -sSfL https://get.k3s.io | \
+    curl -sSfL --connect-timeout 15 --max-time 300 https://get.k3s.io | \
       K3S_URL="https://${MASTER_IP}:6443" \
       K3S_TOKEN="${K3S_TOKEN}" \
       INSTALL_K3S_EXEC="agent --node-label edgekit.io/role=worker" \

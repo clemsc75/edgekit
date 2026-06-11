@@ -70,6 +70,16 @@ SERVER_IMAGE="edgekit-server:${IMAGE_TAG}"
 CLIENT_IMAGE="edgekit-client:${IMAGE_TAG}"
 LOG_FILE="${LOG_DIR}/k3s-master-$(date +%Y%m%d-%H%M%S).log"
 
+# =============================================================================
+# Sudo & Root Privileges Check
+# =============================================================================
+if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
+  echo "ERROR: Ce script doit être exécuté en root, ou votre utilisateur" >&2
+  echo "       doit pouvoir utiliser 'sudo' sans mot de passe (NOPASSWD)." >&2
+  echo "       Sinon, l'exécution bloquera silencieusement en arrière-plan." >&2
+  exit 1
+fi
+
 mkdir -p "${LOG_DIR}"
 # All script-level echo / print_section output goes to terminal + log via tee.
 # run_with_spinner bypasses this by writing command output directly to LOG_FILE.
@@ -287,7 +297,7 @@ ensure_k3s_server() {
 
     # _do_install_k3s_server is a helper so run_with_spinner can wrap the pipe
     _do_install_k3s_server() {
-      curl -sSfL https://get.k3s.io | sh -s - server \
+      curl -sSfL --connect-timeout 15 --max-time 300 https://get.k3s.io | sh -s - server \
         --write-kubeconfig-mode=644 \
         --cluster-init
     }
@@ -332,7 +342,7 @@ ensure_helm() {
   ensure_download_tools
 
   _do_install_helm() {
-    curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    curl -fsSL --connect-timeout 15 --max-time 300 https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
   }
   run_with_spinner "Installing Helm" _do_install_helm
 }
@@ -742,6 +752,51 @@ print_worker_join_info() {
 }
 
 # =============================================================================
+# Setup Cluster Manager
+# =============================================================================
+
+setup_cluster_manager() {
+  print_section "INSTALLING CLUSTER MANAGER (AUTO-SCALING & CLEANUP)"
+  local manager_script="${REPO_ROOT}/scripts/cluster-manager.sh"
+  
+  if [ -f "${manager_script}" ]; then
+    as_root chmod +x "${manager_script}"
+    
+    # Create the cron command
+    local cron_cmd="* * * * * ${manager_script} >> ${LOG_DIR}/cluster-manager.log 2>&1"
+    
+    # Check if already in cron to avoid duplicates
+    if as_root crontab -l 2>/dev/null | grep -q "${manager_script}"; then
+      echo "==> Cluster manager est déjà configuré dans le cron."
+    else
+      echo "==> Configuration de l'exécution automatique (cron) toutes les minutes..."
+      (as_root crontab -l 2>/dev/null || true; echo "${cron_cmd}") | as_root crontab -
+      echo "    Cron job ajouté avec succès."
+    fi
+
+    # Configurer logrotate si possible
+    if [ -d "/etc/logrotate.d" ]; then
+      echo "==> Configuration de la rotation des logs pour le cluster manager..."
+      as_root bash -c "cat << 'EOF' > /etc/logrotate.d/edgekit-cluster-manager
+${LOG_DIR}/cluster-manager.log {
+    weekly
+    rotate 4
+    size 10M
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF"
+    else
+      echo "==> INFO: Le dossier /etc/logrotate.d/ n'existe pas, la rotation des logs est ignorée."
+    fi
+  else
+    echo "WARN: ${manager_script} introuvable, impossible de configurer le cluster manager."
+  fi
+}
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -787,4 +842,5 @@ print_versions
 verify_cluster
 deploy_edgekit_server
 run_server_tests
+setup_cluster_manager
 print_worker_join_info
