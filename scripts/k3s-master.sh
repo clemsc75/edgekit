@@ -260,6 +260,7 @@ ensure_base_packages() {
   local packages=()
 
   command_exists docker || packages+=(docker.io)
+  command_exists crontab || packages+=(cron)
 
   if [ "${#packages[@]}" -gt 0 ] && command_exists apt-get && ! dpkg-query -W -f='${Status}' ca-certificates >/dev/null 2>&1; then
     packages+=(ca-certificates)
