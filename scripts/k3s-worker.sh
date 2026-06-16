@@ -111,9 +111,9 @@ LOG_FILE="${LOG_DIR}/k3s-worker-$(date +%Y%m%d-%H%M%S).log"
 # Sudo & Root Privileges Check
 # =============================================================================
 if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
-  echo "ERROR: Ce script doit être exécuté en root, ou votre utilisateur" >&2
-  echo "       doit pouvoir utiliser 'sudo' sans mot de passe (NOPASSWD)." >&2
-  echo "       Sinon, l'exécution bloquera silencieusement en arrière-plan." >&2
+  echo "ERROR: This script must be run as root, or your user must be able" >&2
+  echo "       to use 'sudo' without a password (NOPASSWD)." >&2
+  echo "       Otherwise, the script will stall silently in the background." >&2
   exit 1
 fi
 
@@ -375,10 +375,10 @@ ensure_system_time() {
     fi
     echo "==> System date synchronized (to prevent SSL Code 60 errors)"
   else
-    echo "WARN: Attention, l'horloge n'a pas pu être synchronisée via get.k3s.io." >&2
-    echo "      Si l'installation échoue avec une erreur 'SSL certificate problem (code 60)'," >&2
-    echo "      veuillez régler l'heure manuellement :" >&2
-    echo "      sudo date -s \"YYYY-MM-DD HH:MM:SS\" (ex: sudo date -s \"$(date +'%Y-%m-%d %H:%M:%S')\")" >&2
+    echo "WARN: Could not synchronize system clock via get.k3s.io." >&2
+    echo "      If K3s installation fails with 'SSL certificate problem (code 60)'," >&2
+    echo "      set the time manually:" >&2
+    echo "      sudo date -s \"YYYY-MM-DD HH:MM:SS\"  (e.g. sudo date -s \"$(date +'%Y-%m-%d %H:%M:%S')\")" >&2
   fi
 }
 
@@ -503,6 +503,36 @@ print_versions() {
 }
 
 # =============================================================================
+# Wait for K3s containerd socket to be ready
+# =============================================================================
+
+# After 'k3s agent install', the k3s-agent service starts in the background.
+# containerd (embedded in k3s) needs a few seconds to initialise and create
+# its Unix socket at /run/k3s/containerd/containerd.sock.
+# Attempting 'k3s ctr' before the socket exists causes a silent failure.
+# This function polls the socket path until it appears or the timeout expires.
+wait_for_containerd() {
+  local socket="/run/k3s/containerd/containerd.sock"
+  local timeout_s=60
+  local interval_s=2
+  local elapsed=0
+
+  echo "==> Waiting for K3s containerd socket to be ready (up to ${timeout_s}s)..."
+
+  while [ ! -S "${socket}" ]; do
+    if [ "${elapsed}" -ge "${timeout_s}" ]; then
+      echo "ERROR: containerd socket '${socket}' did not appear within ${timeout_s}s." >&2
+      echo "       Check 'sudo systemctl status k3s-agent' and 'sudo journalctl -u k3s-agent -n 50'." >&2
+      exit 1
+    fi
+    sleep "${interval_s}"
+    elapsed=$(( elapsed + interval_s ))
+  done
+
+  echo "==> containerd socket is ready (${elapsed}s)."
+}
+
+# =============================================================================
 # Build & deploy EdgeKit client image
 # =============================================================================
 
@@ -519,7 +549,7 @@ deploy_edgekit_client() {
 
   _do_import_client_image() {
     # Import explicitly into the k8s.io containerd namespace so that
-    # Test 4 can verify the image immediately after import.
+    # Test 3 can verify the image immediately after import.
     # Without -n k8s.io the image lands in 'default', which is invisible
     # to 'k3s ctr -n k8s.io images list' used by the verification step.
     #
@@ -535,14 +565,16 @@ deploy_edgekit_client() {
     _tmptar=$(mktemp /tmp/edgekit-client.XXXXXX)
     "${DOCKER_CMD[@]}" save --output "${_tmptar}" "${CLIENT_IMAGE}"
     as_root k3s ctr -n k8s.io images import "${_tmptar}"
+    local _import_rc=$?
     as_root rm -f "${_tmptar}"
+    return "${_import_rc}"
   }
 
   run_with_spinner "Building Docker client image" _do_docker_build_client
   run_with_spinner "Importing client image into containerd" _do_import_client_image
 
   echo ""
-  echo "==> Client image imported successfully"
+  echo "==> Client image imported successfully into containerd (k8s.io namespace)"
   echo "    NOTE: The Helm chart (client replicas) is managed by the master node."
   echo "          The client pods will be scheduled on worker nodes automatically."
 }
@@ -661,12 +693,12 @@ echo "============================================================"
 echo "  EdgeKit – K3s Worker Node Setup"
 echo "  Master  : ${MASTER_IP}"
 if [ "${VERBOSE}" = "1" ]; then
-echo "  Mode    : VERBOSE (full output)"
+  echo "  Mode    : VERBOSE (full output)"
 else
-echo "  Mode    : Spinner (full log: ${LOG_FILE})"
+  echo "  Mode    : Spinner (full log: ${LOG_FILE})"
 fi
 if [ "${SKIP_FIREWALL}" = "1" ]; then
-echo "  Firewall: SKIPPED (--skip-firewall)"
+  echo "  Firewall: SKIPPED (--skip-firewall)"
 fi
 echo "============================================================"
 
@@ -691,6 +723,12 @@ ensure_base_packages
 ensure_docker
 ensure_system_time
 ensure_k3s_agent
+# wait_for_containerd MUST be called before deploy_edgekit_client.
+# k3s-agent starts containerd in the background; the Unix socket at
+# /run/k3s/containerd/containerd.sock may not exist yet immediately
+# after installation. Importing the image before the socket is ready
+# causes a silent failure and an ErrImagePull when the pod is scheduled.
+wait_for_containerd     # Wait for containerd socket before image import
 print_versions
 deploy_edgekit_client
 run_worker_tests

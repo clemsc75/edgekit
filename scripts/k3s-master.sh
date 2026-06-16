@@ -74,9 +74,9 @@ LOG_FILE="${LOG_DIR}/k3s-master-$(date +%Y%m%d-%H%M%S).log"
 # Sudo & Root Privileges Check
 # =============================================================================
 if [ "$(id -u)" -ne 0 ] && ! sudo -n true 2>/dev/null; then
-  echo "ERROR: Ce script doit être exécuté en root, ou votre utilisateur" >&2
-  echo "       doit pouvoir utiliser 'sudo' sans mot de passe (NOPASSWD)." >&2
-  echo "       Sinon, l'exécution bloquera silencieusement en arrière-plan." >&2
+  echo "ERROR: This script must be run as root, or your user must be able" >&2
+  echo "       to use 'sudo' without a password (NOPASSWD)." >&2
+  echo "       Otherwise, the script will stall silently in the background." >&2
   exit 1
 fi
 
@@ -290,6 +290,10 @@ ensure_docker() {
   fi
 }
 
+# =============================================================================
+# K3s server installation
+# =============================================================================
+
 ensure_k3s_server() {
   if command_exists k3s; then
     echo "==> K3s is already installed – ensuring service is running"
@@ -333,6 +337,10 @@ ensure_kubectl() {
   echo "ERROR: kubectl is missing and k3s is not available." >&2
   exit 1
 }
+
+# =============================================================================
+# Helm installation
+# =============================================================================
 
 ensure_helm() {
   if command_exists helm; then
@@ -768,16 +776,16 @@ setup_cluster_manager() {
     
     # Check if already in cron to avoid duplicates
     if as_root crontab -l 2>/dev/null | grep -q "${manager_script}"; then
-      echo "==> Cluster manager est déjà configuré dans le cron."
+      echo "==> Cluster manager cron job is already configured – skipping."
     else
-      echo "==> Configuration de l'exécution automatique (cron) toutes les minutes..."
+      echo "==> Registering cluster manager to run every minute (cron)..."
       (as_root crontab -l 2>/dev/null || true; echo "${cron_cmd}") | as_root crontab -
-      echo "    Cron job ajouté avec succès."
+      echo "    Cron job added successfully."
     fi
 
-    # Configurer logrotate si possible
+    # Configure log rotation if logrotate is available
     if [ -d "/etc/logrotate.d" ]; then
-      echo "==> Configuration de la rotation des logs pour le cluster manager..."
+      echo "==> Configuring log rotation for cluster manager..."
       as_root bash -c "cat << 'EOF' > /etc/logrotate.d/edgekit-cluster-manager
 ${LOG_DIR}/cluster-manager.log {
     weekly
@@ -790,10 +798,10 @@ ${LOG_DIR}/cluster-manager.log {
 }
 EOF"
     else
-      echo "==> INFO: Le dossier /etc/logrotate.d/ n'existe pas, la rotation des logs est ignorée."
+      echo "==> INFO: /etc/logrotate.d/ not found – log rotation skipped."
     fi
   else
-    echo "WARN: ${manager_script} introuvable, impossible de configurer le cluster manager."
+    echo "WARN: ${manager_script} not found – cluster manager will not be installed."
   fi
 }
 
@@ -809,12 +817,12 @@ echo ""
 echo "============================================================"
 echo "  EdgeKit – K3s Master (Server) Node Setup"
 if [ "${VERBOSE}" = "1" ]; then
-echo "  Mode    : VERBOSE (full output)"
+  echo "  Mode    : VERBOSE (full output)"
 else
-echo "  Mode    : Spinner (full log: ${LOG_FILE})"
+  echo "  Mode    : Spinner (full log: ${LOG_FILE})"
 fi
 if [ "${SKIP_FIREWALL}" = "1" ]; then
-echo "  Firewall: SKIPPED (--skip-firewall)"
+  echo "  Firewall: SKIPPED (--skip-firewall)"
 fi
 echo "============================================================"
 
