@@ -564,7 +564,7 @@ deploy_edgekit_server() {
       --set server.image.pullPolicy=IfNotPresent \
       --set client.image.repository=edgekit-client \
       --set client.image.tag="${IMAGE_TAG}" \
-      --set client.image.pullPolicy=IfNotPresent \
+      --set client.image.pullPolicy=Never \
       --set client.replicaCount="${CLIENT_REPLICAS}" \
       --set client.publishIntervalMs="${PUBLISH_INTERVAL_MS}" \
       "${_node_selector_flag}" "${_node_selector_val}"
